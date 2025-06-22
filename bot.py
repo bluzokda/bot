@@ -5,6 +5,7 @@ import asyncio
 import httpx
 import requests
 from bs4 import BeautifulSoup
+import time
 
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -136,6 +137,7 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === Функция для выполнения поиска через Google ===
 def search_google(query):
+    time.sleep(2)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
     }
@@ -144,20 +146,22 @@ def search_google(query):
     soup = BeautifulSoup(response.text, 'html.parser')
     results = []
 
-    for result in soup.find_all('div', class_='g')[:5]:  # Берём первые 5 результатов 
+    # Ищем блоки с результатами 
+    for result in soup.find_all('div', class_='yuRUbf'):  # Блоки с основными результатами
         title_element = result.find('h3')
         link_element = result.find('a')
-        snippet_element = result.find('span', class_='st')
+        snippet_element = result.find('span', class_='aCOpRe')
 
         if title_element and link_element:
             title = title_element.text
             link = link_element['href']
-            snippet = snippet_element.text if snippet_element else ""
+            snippet = snippet_element.text if snippet_element else "Без описания"
             results.append({
                 "title": title,
                 "link": link,
                 "snippet": snippet
             })
+
     return results
 
 # === Команда /search ===
@@ -188,6 +192,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"Ошибка при поиске: {str(e)}")
+        print(e)  # Для отладки
 
 # === Запуск бота === 
 app = ApplicationBuilder().token(TOKEN).build()
