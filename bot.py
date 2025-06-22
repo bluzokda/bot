@@ -101,7 +101,7 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     city = " ".join(context.args)
-    url = f"https://api.weatherapi.com/v1/current.json?key={WEATHER_API_KEY}&q={city}"
+    url = f"https://api.weatherapi.com/v1/current.json?key={os.getenv('WEATHER_API_KEY')}&q={city}"
 
     async with httpx.AsyncClient() as client:
         try:
@@ -109,11 +109,11 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = response.json()
 
             if "error" in data:
-                await update.message.reply_text("Не удалось найти такой город.")
+                await update.message.reply_text(f"Ошибка WeatherAPI: {data['error']['message']}")
                 return
 
             temp_c = data["current"]["temp_c"]
-            condition = data["current"]["condition"][0]["text"]
+            condition = data["current"]["condition"]["text"]
             wind_kph = data["current"]["wind_kph"]
             humidity = data["current"]["humidity"]
 
@@ -127,8 +127,8 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply)
 
         except Exception as e:
-            await update.message.reply_text("Ошибка при получении данных о погоде.")
-            print(e)
+            await update.message.reply_text(f"Ошибка при получении данных о погоде: {str(e)}")
+            print(e)  # Для отладки 
 
 
 # === Запуск бота === 
