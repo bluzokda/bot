@@ -3,6 +3,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import os
 import asyncio
 import httpx
+import requests
+from bs4 import BeautifulSoup
 
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -12,7 +14,7 @@ user_tasks = {}  # {user_id: [список задач]}
 
 # === Функции To-do List ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я твой бот-органайзер. Используй:\n"
+    await update.message.reply_text("Привет! Я твой бот-кент. Используй:\n"
                                     "/add [задача] — добавить задачу\n"
                                     "/list — посмотреть список задач\n"
                                     "/done [номер] — отметить выполненной\n"
