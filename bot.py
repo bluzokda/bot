@@ -131,6 +131,61 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(e)  # Для отладки 
 
 
+# === Функция для выполнения поиска через Google ===
+def search_google(query):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
+    }
+    url = f"https://www.google.com/search?q={query}"
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    results = []
+
+    for result in soup.find_all('div', class_='g')[:5]:  # Берём первые 5 результатов 
+        title_element = result.find('h3')
+        link_element = result.find('a')
+        snippet_element = result.find('span', class_='st')
+
+        if title_element and link_element:
+            title = title_element.text
+            link = link_element['href']
+            snippet = snippet_element.text if snippet_element else ""
+            results.append({
+                "title": title,
+                "link": link,
+                "snippet": snippet
+            })
+    return results
+
+# === Команда /search ===
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Используй: /search [запрос]. Например:\n"
+                                        "/search roblox секретный танк\n"
+                                        "/search minecraft как найти крепость")
+        return
+
+    query = " ".join(context.args)
+    await update.message.reply_text(f"🔍 Ищу в интернете: {query}...")
+
+    try:
+        results = search_google(query)
+
+        if not results:
+            await update.message.reply_text("❌ Ничего не найдено.")
+            return
+
+        reply = f"Результаты по запросу «{query}»:\n\n"
+        for i, res in enumerate(results, start=1):
+            reply += f"{i}. <b>{res['title']}</b>\n"
+            reply += f"{res['snippet']}\n"
+            reply += f"<a href='{res['link']}'>Ссылка</a>\n\n"
+
+        await update.message.reply_text(reply, parse_mode='HTML', disable_web_page_preview=True)
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при поиске: {str(e)}")
+
 # === Запуск бота === 
 app = ApplicationBuilder().token(TOKEN).build()
 
