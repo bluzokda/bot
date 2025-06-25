@@ -296,6 +296,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text("Файл с пользователями не найден")
+# === Запуск бота === 
+if __name__ == "__main__":
 # Инициализируем файл пользователей
     init_users_file()
 # === Запуск бота === 
