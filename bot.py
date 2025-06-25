@@ -5,7 +5,6 @@ import asyncio
 import httpx
 import requests
 import time
-+
 
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
