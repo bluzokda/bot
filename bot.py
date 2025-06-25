@@ -152,7 +152,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_message.chat_id
         
         # ИСПРАВЛЕННАЯ СТРОКА: добавлена закрывающая скобка
-        job_queue.run_once(
+        job_queue.run_once()
             callback=reminder_callback, 
             when=minutes * 60, 
             data=message,
