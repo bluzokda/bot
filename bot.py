@@ -1,106 +1,210 @@
-import os
-import logging
-import requests
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os
+import asyncio
+import httpx
+import requests
+from bs4 import BeautifulSoup
+import time
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Получаем токен из переменной окружения
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Получение переменных окружения (на Render.com они задаются в Dashboard)
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-WEATHER_API_KEY = os.environ.get('WEATHER_API_KEY')
+# Словарь для хранения задач пользователей
+user_tasks = {}  # {user_id: [список задач]}
 
-# Если запускаем локально (для теста)
-if not TELEGRAM_TOKEN or not WEATHER_API_KEY:
-    from dotenv import load_dotenv
-    load_dotenv()
-    TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    WEATHER_API_KEY = os.environ.get('WEATHER_API_KEY')
-
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не установлен!")
-if not WEATHER_API_KEY:
-    raise ValueError("WEATHER_API_KEY не установлен!")
-
-# Команда /start
+# === Функции To-do List ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await update.message.reply_html(
-        f"👋 Привет {user.mention_html()}!\n"
-        "Я бот с функцией погоды!\n\n"
-        "Используй команды:\n"
-        "/start - это сообщение\n"
-        "/help - помощь\n"
-        "/weather <город> - погода в указанном городе\n\n"
-        "Пример: /weather Москва"
-    )
+    await update.message.reply_text("Привет! Я твой бот-кент. Используй:\n"
+                                    "/add [задача] — добавить задачу\n"
+                                    "/list — посмотреть список задач\n"
+                                    "/done [номер] — отметить выполненной\n"
+                                    "/remind через [X] минут [сообщение] — настроить напоминание\n"
+                                    "/weather [город] — узнать погоду\n"
+                                    "/search [запрос] — искать информацию в интернете")
 
-# Команда /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Помощь:\n/weather <город> - узнать погоду")
 
-# Команда /weather
-async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    city = ' '.join(context.args)
-    if not city:
-        await update.message.reply_text("⚠️ Укажите город!\nПример: /weather Москва")
+async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    task = " ".join(context.args)
+    if not task:
+        await update.message.reply_text("Укажи задачу после команды /add")
         return
-    
+
+    if user_id not in user_tasks:
+        user_tasks[user_id] = []
+
+    user_tasks[user_id].append(task)
+    await update.message.reply_text(f"Добавлено: {task}")
+
+
+async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    tasks = user_tasks.get(user_id, [])
+
+    if not tasks:
+        await update.message.reply_text("Список задач пуст.")
+        return
+
+    task_list = "\n".join([f"{i+1}. {task}" for i, task in enumerate(tasks)])
+    await update.message.reply_text("Твои задачи:\n" + task_list)
+
+
+async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    tasks = user_tasks.get(user_id, [])
+
+    if not context.args:
+        await update.message.reply_text("Укажи номер задачи после команды /done")
+        return
+
     try:
-        weather_data = get_weather(city)
-        await update.message.reply_text(weather_data)
-    except Exception as e:
-        logger.error(f"Weather error: {e}")
-        await update.message.reply_text("😢 Не удалось получить погоду. Попробуйте позже.")
+        index = int(context.args[0]) - 1
+        task = tasks.pop(index)
+        await update.message.reply_text(f"Выполнено: {task}")
+    except (ValueError, IndexError):
+        await update.message.reply_text("Неверный номер задачи.")
 
-def get_weather(city: str) -> str:
-    """Получение погоды через OpenWeatherMap API"""
-    base_url = "http://api.openweathermap.org/data/2.5/weather"
-    params = {
-        'q': city,
-        'appid': WEATHER_API_KEY,
-        'units': 'metric',
-        'lang': 'ru'
+
+# === Напоминалка / Reminder ===
+async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 4 or args[0] != "через" or args[2] != "минут":
+        await update.message.reply_text("Используй формат:\n/remind через X минут [сообщение]")
+        return
+
+    try:
+        minutes = int(args[1])
+        message = " ".join(args[3:])
+    except ValueError:
+        await update.message.reply_text("Время должно быть числом.")
+        return
+
+    if not message:
+        await update.message.reply_text("Нет сообщения для напоминания.")
+        return
+
+    await update.message.reply_text(f"Напомню через {minutes} минут: '{message}'")
+
+    # Запуск напоминания в фоне
+    asyncio.create_task(reminder_task(update.effective_user.id, minutes, message, context))
+
+
+async def reminder_task(user_id, minutes, message, context):
+    await asyncio.sleep(minutes * 60)
+    await context.bot.send_message(chat_id=user_id, text=f"⏰ Напоминание: {message}")
+
+
+# === Погода / Weather ===
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")  # Берём из .env или Render
+
+
+async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Укажи город после команды /weather")
+        return
+
+    city = " ".join(context.args)
+    url = f"https://api.weatherapi.com/v1/current.json?key={os.getenv('WEATHER_API_KEY')}&q={city}"
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url)
+            data = response.json()
+
+            if "error" in data:
+                await update.message.reply_text(f"Ошибка WeatherAPI: {data['error']['message']}")
+                return
+
+            temp_c = data["current"]["temp_c"]
+            condition = data["current"]["condition"]["text"]
+            wind_kph = data["current"]["wind_kph"]
+            humidity = data["current"]["humidity"]
+
+            reply = (
+                f"🌤 Погода в {city}:\n"
+                f"Температура: {temp_c}°C\n"
+                f"Состояние: {condition}\n"
+                f"Ветер: {wind_kph} км/ч\n"
+                f"Влажность: {humidity}%"
+            )
+            await update.message.reply_text(reply)
+
+        except Exception as e:
+            await update.message.reply_text(f"Ошибка при получении данных о погоде: {str(e)}")
+            print(e)  # Для отладки 
+
+
+# === Функция для выполнения поиска через Google ===
+def search_google(query):
+    time.sleep(2)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
     }
-    
-    response = requests.get(base_url, params=params, timeout=10)
-    data = response.json()
-    
-    if response.status_code != 200:
-        logger.error(f"API Error: {data.get('message', 'Unknown error')}")
-        return "❌ Ошибка при запросе погоды. Проверьте название города."
-    
-    weather_desc = data['weather'][0]['description'].capitalize()
-    temp = data['main']['temp']
-    feels_like = data['main']['feels_like']
-    humidity = data['main']['humidity']
-    wind = data['wind']['speed']
-    
-    return (
-        f"🌆 Погода в {city}:\n"
-        f"🌡 {temp}°C (ощущается как {feels_like}°C)\n"
-        f"📝 {weather_desc}\n"
-        f"💧 Влажность: {humidity}%\n"
-        f"💨 Ветер: {wind} м/с"
-    )
+    url = f"https://www.google.com/search?q={query}"
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    results = []
 
-def main():
-    # Создаем приложение
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Регистрируем обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("weather", weather))
-    
-    # Запускаем бота
-    logger.info("Бот запущен...")
-    application.run_polling()
+    # Ищем блоки с результатами 
+    for result in soup.find_all('div', class_='yuRUbf'):  # Блоки с основными результатами
+        title_element = result.find('h3')
+        link_element = result.find('a')
+        snippet_element = result.find('span', class_='aCOpRe')
 
-if __name__ == "__main__":
-    main()
+        if title_element and link_element:
+            title = title_element.text
+            link = link_element['href']
+            snippet = snippet_element.text if snippet_element else "Без описания"
+            results.append({
+                "title": title,
+                "link": link,
+                "snippet": snippet
+            })
+
+    return results
+
+# === Команда /search ===
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Используй: /search [запрос]. Например:\n"
+                                        "/search roblox секретный танк\n"
+                                        "/search minecraft как найти крепость")
+        return
+
+    query = " ".join(context.args)
+    await update.message.reply_text(f"🔍 Ищу в интернете: {query}...")
+
+    try:
+        results = search_google(query)
+
+        if not results:
+            await update.message.reply_text("❌ Ничего не найдено.")
+            return
+
+        reply = f"Результаты по запросу «{query}»:\n\n"
+        for i, res in enumerate(results, start=1):
+            reply += f"{i}. <b>{res['title']}</b>\n"
+            reply += f"{res['snippet']}\n"
+            reply += f"<a href='{res['link']}'>Ссылка</a>\n\n"
+
+        await update.message.reply_text(reply, parse_mode='HTML', disable_web_page_preview=True)
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при поиске: {str(e)}")
+        print(e)  # Для отладки
+
+# === Запуск бота === 
+app = ApplicationBuilder().token(TOKEN).build()
+
+# Регистрируем команды
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("add", add_task))
+app.add_handler(CommandHandler("list", list_tasks))
+app.add_handler(CommandHandler("done", done_task))
+app.add_handler(CommandHandler("remind", remind))
+app.add_handler(CommandHandler("weather", weather))
+app.add_handler(CommandHandler("search", search_command))
+
+print("Бот запущен...")
+app.run_polling()
