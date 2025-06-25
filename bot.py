@@ -154,13 +154,13 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_queue = context.job_queue
         chat_id = update.effective_message.chat_id
         
-        # ИСПРАВЛЕННЫЙ ВЫЗОВ: правильное закрытие скобок
+        # ИСПРАВЛЕННАЯ СТРОКА: добавлена закрывающая скобка
         job_queue.run_once(
             callback=reminder_callback, 
             when=minutes * 60, 
             data=message,
             chat_id=chat_id,
-            name=str(chat_id)
+            name=str(chat_id))
         
         await update.message.reply_text(f"⏰ Напоминание установлено! Через {minutes} минут напомню: '{message}'")
     except Exception as e:
