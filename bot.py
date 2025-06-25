@@ -8,7 +8,6 @@ import time
 import csv
 from datetime import datetime
 
-
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
