@@ -10,8 +10,7 @@ from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes,
-    CallbackContext
+    ContextTypes
 )
 
 # Настройка логгирования
@@ -136,7 +135,7 @@ async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             conn.close()
 
-# === Напоминалка / Reminder ===
+# === Напоминалка / Reminder (PTB 21.x) ===
 async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
@@ -154,20 +153,21 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_queue = context.job_queue
         chat_id = update.effective_message.chat_id
         
-        # ИСПРАВЛЕННАЯ СТРОКА: добавлена закрывающая скобка
+        # Для PTB 21.x используем user_id
         job_queue.run_once(
             callback=reminder_callback, 
             when=minutes * 60, 
             data=message,
             chat_id=chat_id,
-            name=str(chat_id))
+            user_id=update.effective_user.id,
+            name=str(update.effective_user.id))
         
         await update.message.reply_text(f"⏰ Напоминание установлено! Через {minutes} минут напомню: '{message}'")
     except Exception as e:
         logger.error(f"Ошибка в remind: {e}")
         await update.message.reply_text("⚠️ Произошла ошибка при установке напоминания")
 
-async def reminder_callback(context: CallbackContext):
+async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
     try:
         job = context.job
         await context.bot.send_message(chat_id=job.chat_id, text=f"⏰ Напоминание: {job.data}")
