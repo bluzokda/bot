@@ -135,52 +135,57 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(e)  # Для отладки 
 
 
-# === Функция для выполнения поиска через Google ===
-def search_google(query):
-    time.sleep(1)  # Уменьшили задержку
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
+# === Альтернативная функция поиска через DuckDuckGo API ===
+def search_duckduckgo(query, max_results=5):
+    url = "https://api.duckduckgo.com/"
+    params = {
+        "q": query,
+        "format": "json",
+        "no_redirect": 1,
+        "no_html": 1,
+        "skip_disambig": 1
     }
-    url = f"https://www.google.com/search?q={query}"
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    results = []
-
-    # Ищем блоки с результатами (актуальные классы)
-    for result in soup.find_all('div', class_='g'):  # Основной контейнер
-        # Заголовок и ссылка
-        title_elem = result.find('h3')
-        if not title_elem:
-            continue
-            
-        link_elem = result.find('a', href=True)
-        if not link_elem:
-            continue
-            
-        # Описание
-        snippet_elem = result.find('div', class_='VwiC3b')
-        snippet = snippet_elem.get_text() if snippet_elem else "Без описания"
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
         
-        # Обработка ссылки (удаляем лишние префиксы)
-        raw_link = link_elem['href']
-        if raw_link.startswith('/url?q='):
-            clean_link = raw_link.split('/url?q=')[1].split('&')[0]
-        else:
-            clean_link = raw_link
-            
-        results.append({
-            "title": title_elem.get_text(),
-            "link": clean_link,
-            "snippet": snippet
-        })
+        results = []
+        # Основной результат
+        if data.get("AbstractText"):
+            results.append({
+                "title": data.get("Heading", "Основной результат"),
+                "snippet": data.get("AbstractText", ""),
+                "link": data.get("AbstractURL", "")
+            })
         
-        # Ограничим количество результатов
-        if len(results) >= 5:
-            break
+        # Дополнительные результаты
+        for i, topic in enumerate(data.get("RelatedTopics", [])):
+            if "Result" in topic:
+                result = topic["Result"]
+                # Парсим результат (простейший парсинг)
+                parts = result.split('">')
+                if len(parts) > 1:
+                    title = parts[1].split("</a>")[0].strip()
+                    snippet = parts[2].split("</a>")[0].strip() if len(parts) > 2 else ""
+                    link = parts[0].split('href="')[1].strip()
+                    
+                    results.append({
+                        "title": title,
+                        "snippet": snippet,
+                        "link": link
+                    })
+            
+            if len(results) >= max_results:
+                break
+        
+        return results
+    
+    except Exception as e:
+        print(f"DuckDuckGo search error: {e}")
+        return []
 
-    return results
-
-# === Команда /search ===
+# === Обновлённая команда /search ===
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Используй: /search [запрос]. Например:\n"
@@ -192,27 +197,30 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Ищу в интернете: {query}...")
 
     try:
-        results = search_google(query)
+        results = search_duckduckgo(query)
 
         if not results:
-            await update.message.reply_text("❌ По вашему запросу ничего не найдено. Попробуйте изменить формулировку.")
+            await update.message.reply_text("❌ Ничего не найдено. Попробуйте другой запрос.")
             return
 
         reply = f"🔎 Результаты по запросу «{query}»:\n\n"
         for i, res in enumerate(results, start=1):
-            reply += f"<b>{i}. {res['title']}</b>\n"
-            reply += f"{res['snippet']}\n"
-            reply += f"<a href='{res['link']}'>Открыть</a>\n\n"
+            title = res.get('title', 'Без названия')
+            snippet = res.get('snippet', 'Без описания')
+            link = res.get('link', '')
+            
+            if link:
+                reply += f"{i}. <b>{title}</b>\n"
+                reply += f"{snippet}\n"
+                reply += f"<a href='{link}'>Открыть</a>\n\n"
+            else:
+                reply += f"{i}. <b>{title}</b>\n{snippet}\n\n"
 
-        await update.message.reply_text(
-            reply, 
-            parse_mode='HTML', 
-            disable_web_page_preview=True
-        )
+        await update.message.reply_text(reply, parse_mode='HTML', disable_web_page_preview=True)
 
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка при поиске: {str(e)}\nПопробуйте позже или измените запрос")
-        print(f"Search error: {e}")  # Для отладки
+        await update.message.reply_text(f"⚠️ Ошибка при поиске: {str(e)}")
+        print(f"Search error: {e}")
 # === Запуск бота === 
 app = ApplicationBuilder().token(TOKEN).build()
 
