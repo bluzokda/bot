@@ -230,6 +230,7 @@ app.add_handler(CommandHandler("list", list_tasks))
 app.add_handler(CommandHandler("done", done_task))
 app.add_handler(CommandHandler("remind", remind))
 app.add_handler(CommandHandler("weather", weather))
+app.add_handler(CommandHandler("search", search_command))
 
 print("Бот запущен...")
 app.run_polling()
