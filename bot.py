@@ -5,6 +5,7 @@ import asyncio
 import httpx
 import requests
 import time
+from bs4 import BeautifulSoup 
 
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -136,7 +137,7 @@ async def weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === Функция для выполнения поиска через Google ===
 def search_google(query):
-    time.sleep(2)
+    time.sleep(1)  # Уменьшили задержку
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
     }
@@ -145,21 +146,37 @@ def search_google(query):
     soup = BeautifulSoup(response.text, 'html.parser')
     results = []
 
-    # Ищем блоки с результатами 
-    for result in soup.find_all('div', class_='yuRUbf'):  # Блоки с основными результатами
-        title_element = result.find('h3')
-        link_element = result.find('a')
-        snippet_element = result.find('span', class_='aCOpRe')
-
-        if title_element and link_element:
-            title = title_element.text
-            link = link_element['href']
-            snippet = snippet_element.text if snippet_element else "Без описания"
-            results.append({
-                "title": title,
-                "link": link,
-                "snippet": snippet
-            })
+    # Ищем блоки с результатами (актуальные классы)
+    for result in soup.find_all('div', class_='g'):  # Основной контейнер
+        # Заголовок и ссылка
+        title_elem = result.find('h3')
+        if not title_elem:
+            continue
+            
+        link_elem = result.find('a', href=True)
+        if not link_elem:
+            continue
+            
+        # Описание
+        snippet_elem = result.find('div', class_='VwiC3b')
+        snippet = snippet_elem.get_text() if snippet_elem else "Без описания"
+        
+        # Обработка ссылки (удаляем лишние префиксы)
+        raw_link = link_elem['href']
+        if raw_link.startswith('/url?q='):
+            clean_link = raw_link.split('/url?q=')[1].split('&')[0]
+        else:
+            clean_link = raw_link
+            
+        results.append({
+            "title": title_elem.get_text(),
+            "link": clean_link,
+            "snippet": snippet
+        })
+        
+        # Ограничим количество результатов
+        if len(results) >= 5:
+            break
 
     return results
 
@@ -178,21 +195,24 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = search_google(query)
 
         if not results:
-            await update.message.reply_text("❌ Ничего не найдено.")
+            await update.message.reply_text("❌ По вашему запросу ничего не найдено. Попробуйте изменить формулировку.")
             return
 
-        reply = f"Результаты по запросу «{query}»:\n\n"
+        reply = f"🔎 Результаты по запросу «{query}»:\n\n"
         for i, res in enumerate(results, start=1):
-            reply += f"{i}. <b>{res['title']}</b>\n"
+            reply += f"<b>{i}. {res['title']}</b>\n"
             reply += f"{res['snippet']}\n"
-            reply += f"<a href='{res['link']}'>Ссылка</a>\n\n"
+            reply += f"<a href='{res['link']}'>Открыть</a>\n\n"
 
-        await update.message.reply_text(reply, parse_mode='HTML', disable_web_page_preview=True)
+        await update.message.reply_text(
+            reply, 
+            parse_mode='HTML', 
+            disable_web_page_preview=True
+        )
 
     except Exception as e:
-        await update.message.reply_text(f"Ошибка при поиске: {str(e)}")
-        print(e)  # Для отладки
-
+        await update.message.reply_text(f"⚠️ Ошибка при поиске: {str(e)}\nПопробуйте позже или измените запрос")
+        print(f"Search error: {e}")  # Для отладки
 # === Запуск бота === 
 app = ApplicationBuilder().token(TOKEN).build()
 
