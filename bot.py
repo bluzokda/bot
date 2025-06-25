@@ -187,7 +187,7 @@ def search_duckduckgo(query, max_results=5):
 # === Обновлённая команда /search ===
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Используй: /search [запрос].)
+        await update.message.reply_text("Используй: /search [запрос].\n)
         return
 
     query = " ".join(context.args)
