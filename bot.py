@@ -4,7 +4,6 @@ import os
 import asyncio
 import httpx
 import requests
-from bs4 import BeautifulSoup
 import time
 
 # Получаем токен из переменной окружения
