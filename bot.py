@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import requests
 import time
-from bs4 import BeautifulSoup 
++
 
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
