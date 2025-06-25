@@ -79,4 +79,4 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
-        me = await application.bot.get_me(
+        me = await application.bot.get_me()
