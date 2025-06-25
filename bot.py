@@ -187,9 +187,7 @@ def search_duckduckgo(query, max_results=5):
 # === Обновлённая команда /search ===
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Используй: /search [запрос]. Например:\n"
-                                        "/search roblox секретный танк\n"
-                                        "/search minecraft как найти крепость")
+        await update.message.reply_text("Используй: /search [запрос].\n"
         return
 
     query = " ".join(context.args)
@@ -230,7 +228,6 @@ app.add_handler(CommandHandler("list", list_tasks))
 app.add_handler(CommandHandler("done", done_task))
 app.add_handler(CommandHandler("remind", remind))
 app.add_handler(CommandHandler("weather", weather))
-app.add_handler(CommandHandler("search", search_command))
 
 print("Бот запущен...")
 app.run_polling()
