@@ -5,6 +5,9 @@ import asyncio
 import httpx
 import requests
 import time
+import csv
+from datetime import datetime
+
 
 # Получаем токен из переменной окружения
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -220,6 +223,81 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Ошибка при поиске: {str(e)}")
         print(f"Search error: {e}")
+# Получаем ID администратора
+ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", 0))
+
+# Файл для хранения информации о пользователях
+USERS_FILE = "bot_users.csv"
+
+# === Инициализация файла пользователей ===
+def init_users_file():
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["user_id", "first_name", "last_name", "username", "first_seen"])
+
+# === Регистрация нового пользователя ===
+def register_user(user):
+    user_exists = False
+    
+    # Проверяем существование пользователя
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader)  # Пропускаем заголовок
+            for row in reader:
+                if row and int(row[0]) == user.id:
+                    user_exists = True
+                    break
+    
+    # Добавляем нового пользователя
+    if not user_exists:
+        with open(USERS_FILE, "a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                user.id,
+                user.first_name,
+                user.last_name or "",
+                user.username or "",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ])
+        return True
+    return False
+
+# === Отправка уведомления администратору ===
+async def notify_admin(context, user, is_new=False):
+    if ADMIN_ID:
+        message = "🆕 Новый пользователь!" if is_new else "👤 Повторный вход"
+        text = (
+            f"{message}\n\n"
+            f"ID: {user.id}\n"
+            f"Имя: {user.first_name}\n"
+            f"Фамилия: {user.last_name or '-'}\n"
+            f"Username: @{user.username or '-'}\n"
+            f"Время: {datetime.now().strftime('%H:%M:%S')}"
+        )
+        await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+
+# === Команда /admin для получения списка пользователей ===
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # Проверяем права администратора
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Эта команда доступна только администратору")
+        return
+    
+    # Отправляем файл с пользователями
+    if os.path.exists(USERS_FILE):
+        await update.message.reply_document(
+            document=open(USERS_FILE, "rb"),
+            filename="bot_users.csv",
+            caption="📊 Список пользователей бота"
+        )
+    else:
+        await update.message.reply_text("Файл с пользователями не найден")
+# Инициализируем файл пользователей
+    init_users_file()
 # === Запуск бота === 
 app = ApplicationBuilder().token(TOKEN).build()
 
@@ -231,6 +309,7 @@ app.add_handler(CommandHandler("done", done_task))
 app.add_handler(CommandHandler("remind", remind))
 app.add_handler(CommandHandler("weather", weather))
 app.add_handler(CommandHandler("search", search_command))
+app.add_handler(CommandHandler("admin", admin_command))
 
 print("Бот запущен...")
 app.run_polling()
