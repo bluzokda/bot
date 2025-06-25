@@ -65,6 +65,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в /start: {e}")
 
 async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = None
     try:
         user_id = update.effective_user.id
         task = " ".join(context.args)
@@ -85,6 +86,7 @@ async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
 async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = None
     try:
         user_id = update.effective_user.id
         conn = sqlite3.connect('tasks.db')
@@ -106,6 +108,7 @@ async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
 async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = None
     try:
         user_id = update.effective_user.id
         if not context.args:
@@ -151,8 +154,8 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job_queue = context.job_queue
         chat_id = update.effective_message.chat_id
         
-        # ИСПРАВЛЕННАЯ СТРОКА: добавлена закрывающая скобка
-        job_queue.run_once()
+        # ИСПРАВЛЕННЫЙ ВЫЗОВ: правильное закрытие скобок
+        job_queue.run_once(
             callback=reminder_callback, 
             when=minutes * 60, 
             data=message,
@@ -288,7 +291,7 @@ async def post_init(application):
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Очередь обновлений очищена")
         
-        me = await application.bot.get_me()  # ИСПРАВЛЕНА ОШИБКА ЗДЕСЬ
+        me = await application.bot.get_me()
         logger.info(f"Бот успешно запущен: @{me.username} (ID: {me.id})")
     except Exception as e:
         logger.error(f"Ошибка инициализации: {e}")
@@ -321,4 +324,3 @@ def main():
 if __name__ == '__main__':
     logger.info("Запуск main()")
     main()
-    logger.info("Приложение завершено")
