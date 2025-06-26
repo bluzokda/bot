@@ -22,7 +22,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "/done [номер] — отметить выполненной\n"
                                     "/remind через [X] минут [сообщение] — настроить напоминание\n"
                                     "/weather [город] — узнать погоду\n"
-                                    "/search [запрос] — искать информацию в интернете")
+                                    "/search [запрос] — искать информацию в интернете") 
 
 
 async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
