@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# База знаний (добавьте свои вопросы и ответы)
+# База знаний
 QA_DATABASE = {
     "теорема пифагора": {
         "answer": "a² + b² = c²",
@@ -65,14 +65,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if response:
         reply = f"✅ Ответ:\n{response['answer']}\n\n🔗 Источник:\n{response['source']}"
     else:
-        reply = "❌ Ответ не найден. Попробуй задать вопрос иначе или добавь его в базу."
+        reply = "❌ Ответ не найден. Попробуй задать вопрос иначе."
     
     await update.message.reply_text(reply)
 
 def main() -> None:
-    TOKEN = os.getenv('TOKEN')
+    # Получаем токен из переменных окружения
+    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     if not TOKEN:
-        logger.error("Токен не найден! Установите переменную окружения TOKEN.")
+        logger.error("Токен не найден! Установите переменную окружения TELEGRAM_BOT_TOKEN.")
         return
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -88,11 +89,14 @@ def main() -> None:
     if RENDER_APP_NAME:
         # Режим для облака
         webhook_url = f"https://{RENDER_APP_NAME}.onrender.com/{TOKEN}"
+        
+        # Установка вебхука
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path=TOKEN,
-            webhook_url=webhook_url
+            webhook_url=webhook_url,
+            secret_token='RENDER',
+            drop_pending_updates=True
         )
         logger.info(f"Бот запущен в облаке: {webhook_url}")
     else:
