@@ -1,9 +1,11 @@
 import os
 import telebot
 import requests
+import json
 from bs4 import BeautifulSoup
 from flask import Flask, request
 import logging
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Настройка логирования
 logging.basicConfig(
@@ -28,6 +30,16 @@ SEARCH_URL = "https://www.google.com/search?q={}&hl=ru"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 }
+
+# Хранение истории (в реальном проекте используйте базу данных)
+user_history = {}
+
+def create_menu():
+    """Создает клавиатуру с основными кнопками"""
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(KeyboardButton('Задать вопрос'))
+    markup.add(KeyboardButton('История'))
+    return markup
 
 def google_search(query):
     """Выполняет поиск в Google и возвращает топ-3 результата"""
@@ -76,48 +88,97 @@ def google_search(query):
         logger.error(f"Ошибка поиска: {str(e)}")
         return None
 
+def save_history(user_id, question, response):
+    """Сохраняет историю запросов пользователя"""
+    if user_id not in user_history:
+        user_history[user_id] = []
+    
+    # Сохраняем только последние 10 записей
+    if len(user_history[user_id]) >= 10:
+        user_history[user_id].pop(0)
+    
+    user_history[user_id].append({
+        "question": question,
+        "response": response
+    })
+
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     logger.info(f"Обработка команды /start от {message.chat.id}")
     try:
         response = (
             "👋 Привет! Я твой поисковый бот-помощник.\n\n"
-            "Просто задай любой вопрос, например:\n"
-            "• Что такое ООП?\n"
-            "• Формула дискриминанта\n"
-            "• История Второй мировой войны\n\n"
-            "Я найду ответ и покажу источники!"
+            "Используй кнопки ниже, чтобы задать вопрос или посмотреть историю."
         )
-        bot.reply_to(message, response)
+        bot.send_message(
+            message.chat.id,
+            response,
+            reply_markup=create_menu()
+        )
     except Exception as e:
         logger.error(f"Ошибка в send_welcome: {str(e)}")
 
-@bot.message_handler(func=lambda msg: True)
-def handle_message(message):
-    logger.info(f"Обработка сообщения от {message.chat.id}: {message.text}")
+@bot.message_handler(func=lambda msg: msg.text == 'Задать вопрос')
+def ask_question(message):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "Введите ваш вопрос:")
+    bot.register_next_step_handler(message, process_question)
+
+def process_question(message):
+    chat_id = message.chat.id
+    question = message.text
+    logger.info(f"Обработка вопроса от {chat_id}: {question}")
+    
     try:
-        bot.send_chat_action(message.chat.id, 'typing')
-        
-        search_results = google_search(message.text)
+        bot.send_chat_action(chat_id, 'typing')
+        search_results = google_search(question)
         
         if not search_results:
-            return bot.reply_to(message, "❌ По вашему запросу ничего не найдено. Попробуйте переформулировать вопрос.")
+            response = "❌ По вашему запросу ничего не найдено. Попробуйте переформулировать вопрос."
+            bot.send_message(chat_id, response, reply_markup=create_menu())
+            return
         
-        response = "🔍 Вот что я нашел:\n\n"
+        response_text = "🔍 Вот что я нашел:\n\n"
         for i, res in enumerate(search_results, 1):
-            response += f"<b>{i}. {res['title']}</b>\n"
-            response += f"<i>{res['snippet']}</i>\n"
-            response += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
+            response_text += f"<b>{i}. {res['title']}</b>\n"
+            response_text += f"<i>{res['snippet']}</i>\n"
+            response_text += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
+        
+        # Сохраняем в историю
+        save_history(chat_id, question, response_text)
         
         bot.send_message(
-            chat_id=message.chat.id,
-            text=response,
+            chat_id=chat_id,
+            text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
+            reply_markup=create_menu()
         )
     except Exception as e:
-        logger.error(f"Ошибка обработки сообщения: {str(e)}")
-        bot.reply_to(message, "⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.")
+        logger.error(f"Ошибка обработки вопроса: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.", reply_markup=create_menu())
+
+@bot.message_handler(func=lambda msg: msg.text == 'История')
+def show_history(message):
+    chat_id = message.chat.id
+    if chat_id not in user_history or not user_history[chat_id]:
+        bot.send_message(chat_id, "История запросов пуста.", reply_markup=create_menu())
+        return
+    
+    history = user_history[chat_id]
+    response = "📚 Ваша история запросов:\n\n"
+    
+    for i, item in enumerate(reversed(history), 1):
+        response += f"<b>{i}. Вопрос:</b> {item['question']}\n"
+        response += f"<b>Ответ:</b> {item['response'][:100]}...\n\n"
+        response += "---\n\n"
+    
+    bot.send_message(
+        chat_id,
+        response,
+        parse_mode='HTML',
+        reply_markup=create_menu()
+    )
 
 @app.route('/')
 def home():
