@@ -2,11 +2,11 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import (
-    Updater, 
-    CommandHandler, 
-    MessageHandler, 
-    Filters, 
-    CallbackContext
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes
 )
 
 # Настройка логов
@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# База данных (в реальном проекте используйте SQLite/PostgreSQL)
+# База данных
 QA_DATABASE = {
     "теорема пифагора": {
         "answer": "a² + b² = c²",
@@ -33,13 +33,13 @@ QA_DATABASE = {
 }
 
 # Обработчики команд
-def start(update: Update, context: CallbackContext) -> None:
-    update.message.reply_text(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
         "Привет! Кидай мне вопрос/задачу, а я найду ответ с источником.\n"
         "Пример: 'теорема пифагора'"
     )
 
-def handle_text(update: Update, context: CallbackContext) -> None:
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text.lower().strip()
     response = QA_DATABASE.get(user_text)
     
@@ -48,32 +48,28 @@ def handle_text(update: Update, context: CallbackContext) -> None:
     else:
         reply = "❌ Ответ не найден. Попробуй задать вопрос иначе."
     
-    update.message.reply_text(reply)
+    await update.message.reply_text(reply)
 
 def main() -> None:
-    # Получаем токен из переменных окружения
     TOKEN = os.getenv('TOKEN')
     if not TOKEN:
         logger.error("Токен не найден! Установите переменную окружения TOKEN.")
         return
 
-    # Создаем бота
-    updater = Updater(TOKEN)
-    dispatcher = updater.dispatcher
+    app = ApplicationBuilder().token(TOKEN).build()
 
     # Регистрируем обработчики
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Режим работы (для Render)
+    # Режим работы для Render
     PORT = int(os.environ.get('PORT', 10000))
-    updater.start_webhook(
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=TOKEN,
-        webhook_url=f"https://bluz.onrender.com/{TOKEN}"
+        webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
     )
-    updater.idle()
 
 if __name__ == '__main__':
     main()
