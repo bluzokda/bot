@@ -56,26 +56,24 @@ def google_search(query):
         results = []
         
         # Поиск результатов по разным возможным селекторам
-        result_blocks = soup.select('div.g')[:5]  # Используем CSS-селектор
+        result_blocks = soup.find_all('div', class_='tF2Cxc') or soup.find_all('div', class_='MjjYud') or soup.find_all('div', class_='g')
         
-        for block in result_blocks:
+        for block in result_blocks[:3]:  # Берем первые 3 результата
             # Извлечение заголовка
-            title_elem = block.select_one('h3')
-            if not title_elem:
-                continue
-            title = title_elem.get_text(strip=True)
+            title_elem = block.find('h3') or block.find('h3', class_='LC20lb') or block.find('div', role='heading')
+            title = title_elem.get_text(strip=True) if title_elem else "Без названия"
             
             # Извлечение ссылки
             link_elem = block.find('a', href=True)
-            if not link_elem:
-                continue
-                
-            link = link_elem['href']
-            if link.startswith('/url?q='):
-                link = link[7:].split('&')[0]
+            if link_elem:
+                link = link_elem['href']
+                if link.startswith('/url?q='):
+                    link = link[7:].split('&')[0]
+            else:
+                link = "#"
             
             # Извлечение описания
-            snippet_elem = block.select_one('div.IsZvec, div.VwiC3b, span.aCOpRe')
+            snippet_elem = block.find('div', class_='VwiC3b') or block.find('div', class_='yXK7lf') or block.find('span', class_='aCOpRe')
             snippet = snippet_elem.get_text(strip=True)[:300] if snippet_elem else "Описание отсутствует"
             
             results.append({
@@ -83,9 +81,6 @@ def google_search(query):
                 "url": link,
                 "snippet": snippet
             })
-            
-            if len(results) >= 3:  # Ограничиваемся 3 результатами
-                break
         
         logger.info(f"Найдено результатов: {len(results)}")
         return results if results else None
@@ -214,14 +209,10 @@ def webhook():
             json_data = request.get_json()
             logger.info("Получен webhook-запрос")
             
-            # Проверяем, что это действительное обновление
-            if 'message' in json_data or 'edited_message' in json_data:
-                update = telebot.types.Update.de_json(json_data)
-                bot.process_new_updates([update])
-                return '', 200
-            else:
-                logger.warning("Получен невалидный webhook-запрос")
-                return 'Invalid update', 400
+            # ОБНОВЛЕНИЕ: Убедимся, что обработка происходит в правильном контексте
+            update = telebot.types.Update.de_json(json_data)
+            bot.process_new_updates([update])
+            return '', 200
         return 'Bad request', 400
     except Exception as e:
         logger.error(f"Ошибка в webhook: {str(e)}")
@@ -235,13 +226,18 @@ def configure_webhook():
             external_url = os.environ.get('RENDER_EXTERNAL_URL')
             if external_url:
                 webhook_url = f"{external_url}/webhook"
+                
+                # Удаляем существующий вебхук перед установкой нового
                 bot.remove_webhook()
+                
                 # Даем время для снятия вебхука
                 import time; time.sleep(1)
+                
+                # Устанавливаем новый вебхук
                 bot.set_webhook(url=webhook_url)
                 logger.info(f"Вебхук установлен: {webhook_url}")
                 
-                # Логируем информацию о вебхуке
+                # Проверяем информацию о вебхуке
                 webhook_info = bot.get_webhook_info()
                 logger.info(f"Информация о вебхуке: {webhook_info}")
                 return
@@ -256,6 +252,12 @@ def configure_webhook():
 
 # Установка вебхука после определения всех обработчиков
 configure_webhook()
+
+# ОБНОВЛЕНИЕ: Добавим обработчик для всех сообщений для диагностики
+@bot.message_handler(func=lambda message: True)
+def debug_handler(message):
+    logger.info(f"DEBUG: Получено сообщение: {message.text}")
+    bot.reply_to(message, "⚠️ Бот работает, но это сообщение не обработано")
 
 if __name__ == '__main__':
     # Локальный запуск
