@@ -1,6 +1,5 @@
 import os
 import logging
-import re
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -71,27 +70,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(reply)
 
 def main() -> None:
-    # Получаем токен и исправляем возможные проблемы
-    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip().replace(' ', '').replace(':', '')
-    if not TOKEN:
-        logger.error("Токен не найден! Установите переменную окружения TELEGRAM_BOT_TOKEN.")
+    # Получаем токен (без изменений)
+    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+    
+    # Проверяем формат токена
+    if not TOKEN or ':' not in TOKEN:
+        logger.error("Неверный формат токена! Токен должен быть в формате 'число:строка'")
+        logger.error(f"Текущий токен: '{TOKEN}'")
         return
 
-    # Получаем имя приложения из URL
-    app_url = os.getenv('REDDER_APP_NAME', '').strip()
-    if app_url:
-        # Извлекаем имя приложения из URL
-        match = re.search(r'https?://([^.]+)\.onrender\.com', app_url)
-        if match:
-            RENDER_APP_NAME = match.group(1)
-        else:
-            # Если не смогли распарсить, используем весь URL
-            RENDER_APP_NAME = app_url
-            logger.warning(f"Не удалось извлечь имя приложения из URL: {app_url}")
-    else:
-        RENDER_APP_NAME = ""
-        logger.warning("REDDER_APP_NAME не установлен")
-
+    # Получаем имя приложения
+    RENDER_APP_NAME = os.getenv('RENDER_APP_NAME', '').strip()
+    if not RENDER_APP_NAME:
+        logger.warning("RENDER_APP_NAME не установлен. Используется локальный режим.")
+    
     # Получаем порт
     try:
         PORT = int(os.environ.get('PORT', 1000))
@@ -99,7 +91,13 @@ def main() -> None:
         PORT = 1000
         logger.warning(f"Некорректное значение PORT, используется {PORT}")
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Создаем приложение
+    try:
+        app = ApplicationBuilder().token(TOKEN).build()
+        logger.info("Бот успешно инициализирован")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации бота: {e}")
+        return
 
     # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
@@ -108,20 +106,26 @@ def main() -> None:
     if RENDER_APP_NAME:
         # Режим для облака
         webhook_url = f"https://{RENDER_APP_NAME}.onrender.com/{TOKEN}"
+        logger.info(f"Попытка запуска в облаке: {webhook_url}")
         
-        # Установка вебхука
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=webhook_url,
-            secret_token='RENDER',
-            drop_pending_updates=True
-        )
-        logger.info(f"Бот запущен в облаке: {webhook_url}")
+        try:
+            # Установка вебхука
+            app.run_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                webhook_url=webhook_url,
+                secret_token='RENDER',
+                drop_pending_updates=True
+            )
+            logger.info(f"Бот запущен в облаке")
+        except Exception as e:
+            logger.error(f"Ошибка запуска вебхука: {e}")
+            logger.info("Попытка запуска в режиме polling")
+            app.run_polling()
     else:
         # Локальный режим
+        logger.info("Запуск в локальном режиме (polling)")
         app.run_polling()
-        logger.info("Бот запущен локально")
 
 if __name__ == '__main__':
     main()
