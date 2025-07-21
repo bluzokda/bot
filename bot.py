@@ -70,7 +70,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(reply)
 
 def main() -> None:
-    # Получаем токен (без изменений)
+    # Получаем токен
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
     
     # Проверяем формат токена
@@ -105,7 +105,7 @@ def main() -> None:
 
     if RENDER_APP_NAME:
         # Режим для облака
-        webhook_url = f"https://{RENDER_APP_NAME}.onrender.com/{TOKEN}"
+        webhook_url = f"https://{RENDER_APP_NAME}.onrender.com"
         logger.info(f"Попытка запуска в облаке: {webhook_url}")
         
         try:
