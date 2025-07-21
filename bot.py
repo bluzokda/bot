@@ -71,7 +71,7 @@ def main() -> None:
         listen="0.0.0.0",
         port=PORT,
         url_path=TOKEN,
-        webhook_url=f"https://your-render-app-name.onrender.com/{TOKEN}"
+        webhook_url=f"https://bluz.onrender.com/{TOKEN}"
     )
     updater.idle()
 
