@@ -1,10 +1,9 @@
 import os
 import telebot
 import requests
-import json
+import logging
 from bs4 import BeautifulSoup
 from flask import Flask, request
-import logging
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 # Настройка логирования
@@ -53,33 +52,43 @@ def google_search(query):
         )
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.text, 'lxml')
+        soup = BeautifulSoup(response.text, 'html.parser')
         results = []
         
-        # Универсальные селекторы
-        result_blocks = soup.select('div.g, div.MjjYud, div.tF2Cxc')[:3]
+        # Поиск результатов по разным возможным селекторам
+        result_blocks = soup.select('div.g')[:5]  # Используем CSS-селектор
         
         for block in result_blocks:
-            title_elem = block.select_one('h3, [role="heading"], h3.LC20lb')
+            # Извлечение заголовка
+            title_elem = block.select_one('h3')
+            if not title_elem:
+                continue
+            title = title_elem.get_text(strip=True)
+            
+            # Извлечение ссылки
             link_elem = block.find('a', href=True)
-            snippet_elem = block.select_one('.VwiC3b, .yXK7lf, .lEBKkf')
+            if not link_elem:
+                continue
+                
+            link = link_elem['href']
+            if link.startswith('/url?q='):
+                link = link[7:].split('&')[0]
             
-            title = title_elem.get_text(strip=True) if title_elem else "Без названия"
-            link = link_elem['href'] if link_elem else "#"
-            
-            if snippet_elem:
-                snippet = snippet_elem.get_text(strip=True)[:300]
-            else:
-                snippet = "Описание отсутствует"
+            # Извлечение описания
+            snippet_elem = block.select_one('div.IsZvec, div.VwiC3b, span.aCOpRe')
+            snippet = snippet_elem.get_text(strip=True)[:300] if snippet_elem else "Описание отсутствует"
             
             results.append({
                 "title": title,
                 "url": link,
                 "snippet": snippet
             })
+            
+            if len(results) >= 3:  # Ограничиваемся 3 результатами
+                break
         
         logger.info(f"Найдено результатов: {len(results)}")
-        return results
+        return results if results else None
         
     except requests.exceptions.Timeout:
         logger.warning("Таймаут запроса к Google")
@@ -104,8 +113,8 @@ def save_history(user_id, question, response):
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    logger.info(f"Обработка команды /start от {message.chat.id}")
     try:
+        logger.info(f"Обработка команды /start от {message.chat.id}")
         response = (
             "👋 Привет! Я твой поисковый бот-помощник.\n\n"
             "Используй кнопки ниже, чтобы задать вопрос или посмотреть историю."
@@ -115,27 +124,31 @@ def send_welcome(message):
             response,
             reply_markup=create_menu()
         )
+        logger.info("Приветственное сообщение отправлено")
     except Exception as e:
         logger.error(f"Ошибка в send_welcome: {str(e)}")
 
-@bot.message_handler(func=lambda msg: msg.text == 'Задать вопрос')
-def ask_question(message):
-    chat_id = message.chat.id
-    bot.send_message(chat_id, "Введите ваш вопрос:")
-    bot.register_next_step_handler(message, process_question)
+@bot.message_handler(func=lambda message: message.text == 'Задать вопрос')
+def handle_ask_question(message):
+    try:
+        logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
+        msg = bot.send_message(message.chat.id, "Введите ваш вопрос:", reply_markup=None)
+        bot.register_next_step_handler(msg, process_question)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_ask_question: {str(e)}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
 
 def process_question(message):
-    chat_id = message.chat.id
-    question = message.text
-    logger.info(f"Обработка вопроса от {chat_id}: {question}")
-    
     try:
+        chat_id = message.chat.id
+        question = message.text
+        logger.info(f"Обработка вопроса от {chat_id}: {question}")
+        
         bot.send_chat_action(chat_id, 'typing')
         search_results = google_search(question)
         
         if not search_results:
-            response = "❌ По вашему запросу ничего не найдено. Попробуйте переформулировать вопрос."
-            bot.send_message(chat_id, response, reply_markup=create_menu())
+            bot.send_message(chat_id, "❌ По вашему запросу ничего не найдено. Попробуйте переформулировать вопрос.", reply_markup=create_menu())
             return
         
         response_text = "🔍 Вот что я нашел:\n\n"
@@ -154,31 +167,41 @@ def process_question(message):
             disable_web_page_preview=True,
             reply_markup=create_menu()
         )
+        logger.info("Ответ отправлен")
     except Exception as e:
-        logger.error(f"Ошибка обработки вопроса: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.", reply_markup=create_menu())
+        logger.error(f"Ошибка в process_question: {str(e)}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
 
-@bot.message_handler(func=lambda msg: msg.text == 'История')
-def show_history(message):
-    chat_id = message.chat.id
-    if chat_id not in user_history or not user_history[chat_id]:
-        bot.send_message(chat_id, "История запросов пуста.", reply_markup=create_menu())
-        return
-    
-    history = user_history[chat_id]
-    response = "📚 Ваша история запросов:\n\n"
-    
-    for i, item in enumerate(reversed(history), 1):
-        response += f"<b>{i}. Вопрос:</b> {item['question']}\n"
-        response += f"<b>Ответ:</b> {item['response'][:100]}...\n\n"
-        response += "---\n\n"
-    
-    bot.send_message(
-        chat_id,
-        response,
-        parse_mode='HTML',
-        reply_markup=create_menu()
-    )
+@bot.message_handler(func=lambda message: message.text == 'История')
+def handle_history(message):
+    try:
+        chat_id = message.chat.id
+        logger.info(f"Обработка 'История' от {chat_id}")
+        
+        if chat_id not in user_history or not user_history[chat_id]:
+            bot.send_message(chat_id, "История запросов пуста.", reply_markup=create_menu())
+            return
+        
+        history = user_history[chat_id]
+        response = "📚 Ваша история запросов:\n\n"
+        
+        for i, item in enumerate(reversed(history), 1):
+            response += f"<b>{i}. Вопрос:</b> {item['question']}\n"
+            # Показываем первый результат из ответа
+            first_result = item['response'].split('\n\n')[0] if '\n\n' in item['response'] else item['response'][:100]
+            response += f"<b>Ответ:</b> {first_result}...\n"
+            response += "─" * 20 + "\n\n"
+        
+        bot.send_message(
+            chat_id,
+            response,
+            parse_mode='HTML',
+            reply_markup=create_menu()
+        )
+        logger.info("История отправлена")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_history: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
 
 @app.route('/')
 def home():
@@ -189,10 +212,16 @@ def webhook():
     try:
         if request.headers.get('content-type') == 'application/json':
             json_data = request.get_json()
-            logger.info(f"Получен webhook: {json_data}")
-            update = telebot.types.Update.de_json(json_data)
-            bot.process_new_updates([update])
-            return '', 200
+            logger.info("Получен webhook-запрос")
+            
+            # Проверяем, что это действительное обновление
+            if 'message' in json_data or 'edited_message' in json_data:
+                update = telebot.types.Update.de_json(json_data)
+                bot.process_new_updates([update])
+                return '', 200
+            else:
+                logger.warning("Получен невалидный webhook-запрос")
+                return 'Invalid update', 400
         return 'Bad request', 400
     except Exception as e:
         logger.error(f"Ошибка в webhook: {str(e)}")
@@ -211,6 +240,10 @@ def configure_webhook():
                 import time; time.sleep(1)
                 bot.set_webhook(url=webhook_url)
                 logger.info(f"Вебхук установлен: {webhook_url}")
+                
+                # Логируем информацию о вебхуке
+                webhook_info = bot.get_webhook_info()
+                logger.info(f"Информация о вебхуке: {webhook_info}")
                 return
             else:
                 logger.warning("RENDER_EXTERNAL_URL не найден!")
@@ -221,7 +254,7 @@ def configure_webhook():
     except Exception as e:
         logger.error(f"Ошибка настройки вебхука: {str(e)}")
 
-# Конфигурируем вебхук при импорте модуля
+# Установка вебхука после определения всех обработчиков
 configure_webhook()
 
 if __name__ == '__main__':
