@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# База данных
+# База знаний (добавьте свои вопросы и ответы)
 QA_DATABASE = {
     "теорема пифагора": {
         "answer": "a² + b² = c²",
@@ -29,6 +29,14 @@ QA_DATABASE = {
     "столица россии": {
         "answer": "Москва",
         "source": "https://ru.wikipedia.org/wiki/Москва"
+    },
+    "формула эйнштейна": {
+        "answer": "E = mc²",
+        "source": "https://ru.wikipedia.org/wiki/Эквивалентность_массы_и_энергии"
+    },
+    "закон ома": {
+        "answer": "I = U/R",
+        "source": "https://ru.wikipedia.org/wiki/Закон_Ома"
     }
 }
 
@@ -36,17 +44,28 @@ QA_DATABASE = {
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Привет! Кидай мне вопрос/задачу, а я найду ответ с источником.\n"
-        "Пример: 'теорема пифагора'"
+        "Примеры вопросов:\n"
+        "- теорема пифагора\n"
+        "- формула дискриминанта\n"
+        "- столица россии\n"
+        "- формула эйнштейна\n"
+        "- закон ома"
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text.lower().strip()
-    response = QA_DATABASE.get(user_text)
+    
+    # Поиск наиболее подходящего вопроса
+    response = None
+    for question in QA_DATABASE:
+        if question in user_text:
+            response = QA_DATABASE[question]
+            break
     
     if response:
         reply = f"✅ Ответ:\n{response['answer']}\n\n🔗 Источник:\n{response['source']}"
     else:
-        reply = "❌ Ответ не найден. Попробуй задать вопрос иначе."
+        reply = "❌ Ответ не найден. Попробуй задать вопрос иначе или добавь его в базу."
     
     await update.message.reply_text(reply)
 
@@ -64,12 +83,22 @@ def main() -> None:
 
     # Режим работы для Render
     PORT = int(os.environ.get('PORT', 10000))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TOKEN}"
-    )
+    RENDER_APP_NAME = os.getenv('RENDER_APP_NAME')
+    
+    if RENDER_APP_NAME:
+        # Режим для облака
+        webhook_url = f"https://{RENDER_APP_NAME}.onrender.com/{TOKEN}"
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=webhook_url
+        )
+        logger.info(f"Бот запущен в облаке: {webhook_url}")
+    else:
+        # Локальный режим
+        app.run_polling()
+        logger.info("Бот запущен локально")
 
 if __name__ == '__main__':
     main()
