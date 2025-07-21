@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -70,11 +71,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(reply)
 
 def main() -> None:
-    # Получаем токен из переменных окружения
-    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    # Получаем токен и исправляем возможные проблемы
+    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip().replace(' ', '').replace(':', '')
     if not TOKEN:
         logger.error("Токен не найден! Установите переменную окружения TELEGRAM_BOT_TOKEN.")
         return
+
+    # Получаем имя приложения из URL
+    app_url = os.getenv('REDDER_APP_NAME', '').strip()
+    if app_url:
+        # Извлекаем имя приложения из URL
+        match = re.search(r'https?://([^.]+)\.onrender\.com', app_url)
+        if match:
+            RENDER_APP_NAME = match.group(1)
+        else:
+            # Если не смогли распарсить, используем весь URL
+            RENDER_APP_NAME = app_url
+            logger.warning(f"Не удалось извлечь имя приложения из URL: {app_url}")
+    else:
+        RENDER_APP_NAME = ""
+        logger.warning("REDDER_APP_NAME не установлен")
+
+    # Получаем порт
+    try:
+        PORT = int(os.environ.get('PORT', 1000))
+    except ValueError:
+        PORT = 1000
+        logger.warning(f"Некорректное значение PORT, используется {PORT}")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -82,10 +105,6 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Режим работы для Render
-    PORT = int(os.environ.get('PORT', 10000))
-    RENDER_APP_NAME = os.getenv('RENDER_APP_NAME')
-    
     if RENDER_APP_NAME:
         # Режим для облака
         webhook_url = f"https://{RENDER_APP_NAME}.onrender.com/{TOKEN}"
