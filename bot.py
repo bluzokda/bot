@@ -6,7 +6,10 @@ from flask import Flask, request
 import logging
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -18,6 +21,7 @@ if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
 bot = telebot.TeleBot(BOT_TOKEN)
+logger.info("Бот инициализирован")
 
 # Настройки поиска
 SEARCH_URL = "https://www.google.com/search?q={}&hl=ru"
@@ -28,6 +32,7 @@ HEADERS = {
 def google_search(query):
     """Выполняет поиск в Google и возвращает топ-3 результата"""
     try:
+        logger.info(f"Поисковый запрос: {query}")
         formatted_query = query.replace(" ", "+")
         response = requests.get(
             SEARCH_URL.format(formatted_query), 
@@ -39,44 +44,60 @@ def google_search(query):
         soup = BeautifulSoup(response.text, 'lxml')
         results = []
         
-        # Универсальные селекторы для разных версий Google
-        result_blocks = soup.find_all('div', class_='tF2Cxc') or soup.find_all('div', class_='MjjYud')
+        # Универсальные селекторы
+        result_blocks = soup.select('div.g, div.MjjYud, div.tF2Cxc')[:3]
         
-        for block in result_blocks[:3]:
-            title_elem = block.find('h3') or block.find('div', role='heading') or block.find('h3', class_='LC20lb')
+        for block in result_blocks:
+            title_elem = block.select_one('h3, [role="heading"], h3.LC20lb')
             link_elem = block.find('a', href=True)
-            snippet_elem = block.find('div', class_='VwiC3b') or block.find('div', class_='yXK7lf')
+            snippet_elem = block.select_one('.VwiC3b, .yXK7lf, .lEBKkf')
             
             title = title_elem.get_text(strip=True) if title_elem else "Без названия"
             link = link_elem['href'] if link_elem else "#"
-            snippet = snippet_elem.get_text(strip=True)[:300] if snippet_elem else "Описание отсутствует"
+            
+            if snippet_elem:
+                snippet = snippet_elem.get_text(strip=True)[:300]
+            else:
+                snippet = "Описание отсутствует"
             
             results.append({
                 "title": title,
                 "url": link,
                 "snippet": snippet
             })
-            
-        return results if results else None
+        
+        logger.info(f"Найдено результатов: {len(results)}")
+        return results
         
     except requests.exceptions.Timeout:
+        logger.warning("Таймаут запроса к Google")
         return [{"title": "⏱️ Таймаут запроса", "snippet": "Google не ответил вовремя", "url": ""}]
     except Exception as e:
         logger.error(f"Ошибка поиска: {str(e)}")
         return None
 
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Я твой поисковый бот-помощник. Просто задай любой вопрос, например:\n\n"
-                          "• Что такое ООП?\n"
-                          "• Формула дискриминанта\n"
-                          "• История Второй мировой войны\n\n"
-                          "Я найду ответ и покажу источники!")
+    logger.info(f"Обработка команды /start от {message.chat.id}")
+    try:
+        response = (
+            "👋 Привет! Я твой поисковый бот-помощник.\n\n"
+            "Просто задай любой вопрос, например:\n"
+            "• Что такое ООП?\n"
+            "• Формула дискриминанта\n"
+            "• История Второй мировой войны\n\n"
+            "Я найду ответ и покажу источники!"
+        )
+        bot.reply_to(message, response)
+    except Exception as e:
+        logger.error(f"Ошибка в send_welcome: {str(e)}")
 
 @bot.message_handler(func=lambda msg: True)
 def handle_message(message):
+    logger.info(f"Обработка сообщения от {message.chat.id}: {message.text}")
     try:
         bot.send_chat_action(message.chat.id, 'typing')
+        
         search_results = google_search(message.text)
         
         if not search_results:
@@ -104,12 +125,17 @@ def home():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_data = request.get_json()
-        update = telebot.types.Update.de_json(json_data)
-        bot.process_new_updates([update])
-        return '', 200
-    return 'Bad request', 400
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_data = request.get_json()
+            logger.info(f"Получен webhook: {json_data}")
+            update = telebot.types.Update.de_json(json_data)
+            bot.process_new_updates([update])
+            return '', 200
+        return 'Bad request', 400
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {str(e)}")
+        return 'Server error', 500
 
 def configure_webhook():
     """Настраивает вебхук при запуске приложения"""
@@ -120,6 +146,8 @@ def configure_webhook():
             if external_url:
                 webhook_url = f"{external_url}/webhook"
                 bot.remove_webhook()
+                # Даем время для снятия вебхука
+                import time; time.sleep(1)
                 bot.set_webhook(url=webhook_url)
                 logger.info(f"Вебхук установлен: {webhook_url}")
                 return
