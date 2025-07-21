@@ -1,131 +1,122 @@
 import os
-import logging
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes
-)
+import telebot
+import requests
+from bs4 import BeautifulSoup
+from flask import Flask, request
 
-# Настройка логов
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Инициализация Flask приложения
+app = Flask(__name__)
 
-# База знаний
-QA_DATABASE = {
-    "теорема пифагора": {
-        "answer": "a² + b² = c²",
-        "source": "https://ru.wikipedia.org/wiki/Теорема_Пифагора"
-    },
-    "формула дискриминанта": {
-        "answer": "D = b² - 4ac",
-        "source": "https://ru.wikipedia.org/wiki/Дискриминант"
-    },
-    "столица россии": {
-        "answer": "Москва",
-        "source": "https://ru.wikipedia.org/wiki/Москва"
-    },
-    "формула эйнштейна": {
-        "answer": "E = mc²",
-        "source": "https://ru.wikipedia.org/wiki/Эквивалентность_массы_и_энергии"
-    },
-    "закон ома": {
-        "answer": "I = U/R",
-        "source": "https://ru.wikipedia.org/wiki/Закон_Ома"
-    }
+# Конфигурация
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Настройки поиска
+SEARCH_URL = "https://www.google.com/search?q={}&hl=ru"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 }
 
-# Обработчики команд
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Привет! Кидай мне вопрос/задачу, а я найду ответ с источником.\n"
-        "Примеры вопросов:\n"
-        "- теорема пифагора\n"
-        "- формула дискриминанта\n"
-        "- столица россии\n"
-        "- формула эйнштейна\n"
-        "- закон ома"
-    )
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_text = update.message.text.lower().strip()
-    
-    # Поиск наиболее подходящего вопроса
-    response = None
-    for question in QA_DATABASE:
-        if question in user_text:
-            response = QA_DATABASE[question]
-            break
-    
-    if response:
-        reply = f"✅ Ответ:\n{response['answer']}\n\n🔗 Источник:\n{response['source']}"
-    else:
-        reply = "❌ Ответ не найден. Попробуй задать вопрос иначе."
-    
-    await update.message.reply_text(reply)
-
-def main() -> None:
-    # Получаем токен
-    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-    
-    # Проверяем формат токена
-    if not TOKEN or ':' not in TOKEN:
-        logger.error("Неверный формат токена! Токен должен быть в формате 'число:строка'")
-        logger.error(f"Текущий токен: '{TOKEN}'")
-        return
-
-    # Получаем имя приложения
-    RENDER_APP_NAME = os.getenv('RENDER_APP_NAME', '').strip()
-    if not RENDER_APP_NAME:
-        logger.warning("RENDER_APP_NAME не установлен. Используется локальный режим.")
-    
-    # Получаем порт
+def google_search(query):
+    """Выполняет поиск в Google и возвращает топ-3 результата"""
     try:
-        PORT = int(os.environ.get('PORT', 1000))
-    except ValueError:
-        PORT = 1000
-        logger.warning(f"Некорректное значение PORT, используется {PORT}")
-
-    # Создаем приложение
-    try:
-        app = ApplicationBuilder().token(TOKEN).build()
-        logger.info("Бот успешно инициализирован")
-    except Exception as e:
-        logger.error(f"Ошибка инициализации бота: {e}")
-        return
-
-    # Регистрируем обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    if RENDER_APP_NAME:
-        # Режим для облака
-        webhook_url = f"https://{RENDER_APP_NAME}.onrender.com"
-        logger.info(f"Попытка запуска в облаке: {webhook_url}")
+        formatted_query = query.replace(" ", "+")
+        response = requests.get(
+            SEARCH_URL.format(formatted_query), 
+            headers=HEADERS, 
+            timeout=10
+        )
+        response.raise_for_status()
         
-        try:
-            # Установка вебхука
-            app.run_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                webhook_url=webhook_url,
-                secret_token='RENDER',
-                drop_pending_updates=True
-            )
-            logger.info(f"Бот запущен в облаке")
-        except Exception as e:
-            logger.error(f"Ошибка запуска вебхука: {e}")
-            logger.info("Попытка запуска в режиме polling")
-            app.run_polling()
+        soup = BeautifulSoup(response.text, 'lxml')
+        results = []
+        
+        # Поиск результатов (Google часто меняет структуру, поэтому проверяем несколько вариантов)
+        for block in soup.find_all('div', class_=['tF2Cxc', 'MjjYud', 'g Ww4FFb vt6azd tF2Cxc'])[:3]:
+            title_elem = block.find('h3') or block.find('div', role='heading')
+            if not title_elem:
+                continue
+                
+            title = title_elem.text
+            link_elem = block.find('a', href=True)
+            link = link_elem['href'] if link_elem else "#"
+            
+            snippet_elem = block.find(attrs={'data-sncf': True}) or block.find('div', class_=['VwiC3b', 'yXK7lf'])
+            snippet = snippet_elem.text if snippet_elem else "Описание отсутствует"
+            
+            results.append({
+                "title": title,
+                "url": link,
+                "snippet": snippet[:300] + "..." if len(snippet) > 300 else snippet  # Ограничение длины
+            })
+            
+        return results if results else None
+        
+    except requests.exceptions.Timeout:
+        return [{"title": "⏱️ Таймаут запроса", "snippet": "Google не ответил вовремя", "url": ""}]
+    except Exception as e:
+        print(f"Ошибка поиска: {str(e)}")
+        return None
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "👋 Привет! Задай любой вопрос, и я найду ответ с источниками!\n\n"
+                          "Например: \n• Что такое ООП?\n• Формула дискриминанта\n• История второй мировой войны")
+
+@bot.message_handler(func=lambda msg: True)
+def handle_message(message):
+    try:
+        bot.send_chat_action(message.chat.id, 'typing')
+        search_results = google_search(message.text)
+        
+        if not search_results:
+            return bot.reply_to(message, "❌ Ничего не найдено. Попробуйте переформулировать вопрос.")
+        
+        response = "🔍 Вот что я нашел по вашему запросу:\n\n"
+        for i, res in enumerate(search_results, 1):
+            response += f"<b>{i}. {res['title']}</b>\n"
+            response += f"<i>{res['snippet']}</i>\n"
+            response += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
+        
+        bot.send_message(
+            chat_id=message.chat.id,
+            text=response,
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Ошибка обработки сообщения: {str(e)}")
+        bot.reply_to(message, f"⚠️ Произошла ошибка: {str(e)}")
+
+# Вебхук обработчики
+@app.route('/')
+def home():
+    return "🤖 Telegram Search Bot работает! Добавьте /webhook для обработки сообщений."
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_data = request.get_json()
+        update = telebot.types.Update.de_json(json_data)
+        bot.process_new_updates([update])
+        return '', 200
+    return 'Bad request', 400
+
+def setup_webhook():
+    """Настройка вебхука при запуске на Render"""
+    if os.environ.get('RENDER'):
+        external_url = os.environ.get('RENDER_EXTERNAL_URL')
+        if external_url:
+            webhook_url = f"{external_url}/webhook"
+            bot.remove_webhook()
+            bot.set_webhook(url=webhook_url)
+            print(f"Webhook установлен: {webhook_url}")
+        else:
+            print("RENDER_EXTERNAL_URL не установлен!")
     else:
-        # Локальный режим
-        logger.info("Запуск в локальном режиме (polling)")
-        app.run_polling()
+        print("Локальный режим: вебхук не используется")
 
 if __name__ == '__main__':
-    main()
+    setup_webhook()
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
