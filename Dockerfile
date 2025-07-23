@@ -22,5 +22,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копирование исходного кода
 COPY . .
 
-# Команда запуска
+# Команда запуска (исправленная)
 CMD ["sh", "-c", "gunicorn --workers 1 --timeout 600 --bind 0.0.0.0:$PORT bot:app"]
