@@ -5,12 +5,12 @@ import logging
 import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import io
-from bs4 import BeautifulSoup
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import re
 import time
+import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -41,10 +41,8 @@ except Exception as e:
 # Настройки поиска
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/json",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Referer": "https://www.google.com/",
-    "DNT": "1",
 }
 
 # Хранение истории
@@ -59,138 +57,50 @@ def create_menu():
     return markup
 
 def search_internet(query):
-    """Ищет информацию по запросу в нескольких источниках"""
+    """Ищет информацию по запросу через DuckDuckGo API"""
     try:
         logger.info(f"Поисковый запрос: {query}")
         
-        # Пробуем разные поисковые системы
-        results = google_search(query)
-        if not results or len(results) < 3:
-            logger.info("Пробуем DuckDuckGo как резервный вариант")
-            ddg_results = duckduckgo_search(query)
-            if ddg_results:
-                # Объединяем результаты, если есть
-                results = (results or []) + ddg_results
+        # Форматируем запрос для API
+        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
+        url = f"https://api.duckduckgo.com/?q={formatted_query}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
         
-        if not results:
-            return None
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        data = response.json()
         
-        # Фильтруем результаты с пустыми заголовками
-        filtered_results = []
-        for res in results:
-            if res['title'].strip() and res['url'].strip() and not res['url'].startswith('https://www.google.com/'):
-                filtered_results.append(res)
-                if len(filtered_results) >= 5:  # Ограничиваем 5 результатами
-                    break
+        results = []
         
-        return filtered_results
+        # Основной результат
+        if data.get("AbstractText"):
+            results.append({
+                "title": data.get("Heading", "Основной результат"),
+                "url": data.get("AbstractURL", "#"),
+                "snippet": data.get("AbstractText", "Описание отсутствует")
+            })
+        
+        # Похожие темы
+        for topic in data.get("RelatedTopics", [])[:5]:
+            if "FirstURL" in topic and "Text" in topic:
+                results.append({
+                    "title": topic["Text"].split(" — ")[0],
+                    "url": topic["FirstURL"],
+                    "snippet": topic["Text"]
+                })
+        
+        # Результаты из внешних источников
+        for result in data.get("Results", [])[:5]:
+            results.append({
+                "title": result.get("Text", "Без названия"),
+                "url": result.get("FirstURL", "#"),
+                "snippet": result.get("Text", "Описание отсутствует")
+            })
+        
+        logger.info(f"Найдено результатов: {len(results)}")
+        return results if results else None
         
     except Exception as e:
         logger.error(f"Ошибка поиска: {str(e)}")
-        return None
-
-def google_search(query):
-    """Поиск в Google с улучшенными селекторами"""
-    try:
-        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
-        response = requests.get(
-            f"https://www.google.com/search?q={formatted_query}&hl=ru", 
-            headers=HEADERS, 
-            timeout=15
-        )
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        
-        # Новые актуальные селекторы для Google (июль 2025)
-        result_blocks = soup.select('div.g') or soup.select('div.tF2Cxc') or soup.select('div.MjjYud')
-        
-        for block in result_blocks[:8]:
-            # Извлечение заголовка - новые селекторы
-            title_elem = block.select_one('h3, .LC20lb, .DKV0Hd, .zBAuLc, .lEBKkf')
-            title = title_elem.get_text(strip=True) if title_elem else ""
-            
-            # Извлечение ссылки
-            link_elem = block.find('a', href=True)
-            link = ""
-            if link_elem:
-                link = link_elem['href']
-                if link.startswith('/url?q='):
-                    link = link[7:].split('&')[0]
-                elif link.startswith('/search?') or link.startswith('https://www.google.com/'):
-                    continue  # Пропускаем внутренние ссылки Google
-            
-            # Извлечение описания - новые селекторы
-            snippet_elem = block.select_one('.VwiC3b, .lEBKkf, .hgKElc, .IsZvec, .MUxGbd')
-            snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
-            
-            # Пропускаем рекламные и пустые результаты
-            if not title or "google" in link or "doubleclick" in link or not link:
-                continue
-                
-            results.append({
-                "title": title,
-                "url": link,
-                "snippet": snippet
-            })
-        
-        logger.info(f"Google найдено результатов: {len(results)}")
-        return results
-        
-    except Exception as e:
-        logger.error(f"Ошибка Google поиска: {str(e)}")
-        return None
-
-def duckduckgo_search(query):
-    """Поиск в DuckDuckGo как резервный вариант"""
-    try:
-        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
-        response = requests.get(
-            f"https://html.duckduckgo.com/html/?q={formatted_query}", 
-            headers=HEADERS, 
-            timeout=15
-        )
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        
-        # Парсинг результатов DuckDuckGo
-        result_blocks = soup.select('.result, .web-result')
-        
-        for block in result_blocks[:5]:
-            # Извлечение заголовка
-            title_elem = block.select_one('.result__a, .web-result__title')
-            title = title_elem.get_text(strip=True) if title_elem else ""
-            
-            # Извлечение ссылки
-            link = ""
-            if title_elem and title_elem.has_attr('href'):
-                link = title_elem['href']
-                if link.startswith('//duckduckgo.com') or not link:
-                    continue
-                if link.startswith('//'):
-                    link = "https:" + link
-            
-            # Извлечение описания
-            snippet_elem = block.select_one('.result__snippet, .web-result__description')
-            snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
-            
-            if not title or not link:
-                continue
-                
-            results.append({
-                "title": title,
-                "url": link,
-                "snippet": snippet
-            })
-        
-        logger.info(f"DuckDuckGo найдено результатов: {len(results)}")
-        return results
-        
-    except Exception as e:
-        logger.error(f"Ошибка DuckDuckGo поиска: {str(e)}")
         return None
 
 def save_history(user_id, question, response):
@@ -268,7 +178,7 @@ def send_welcome(message):
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n\n"
             "📌 Советы для лучшего результата:\n"
-            "1. Формулируйте вопросы четко (например: 'Что такое теорема Пифагора?')\n"
+            "1. Формулируйте вопросы четко (например: 'Что такое фотосинтез?')\n"
             "2. Фотографируйте текст при хорошем освещении\n"
             "3. Держите камеру параллельно тексту\n"
             "4. Убедитесь, что текст занимает большую часть кадра\n\n"
@@ -323,18 +233,12 @@ def process_text_question(message):
         search_results = search_internet(question)
         
         if not search_results:
-            # Попробуем найти ответ без спецсимволов
-            clean_question = re.sub(r'[^\w\s]', '', question)
-            if clean_question != question:
-                search_results = search_internet(clean_question)
-            
-            if not search_results:
-                bot.send_message(
-                    chat_id, 
-                    "❌ По вашему запросу ничего не найдено.\n\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
-                    reply_markup=create_menu()
-                )
-                return
+            bot.send_message(
+                chat_id, 
+                "❌ По вашему запросу ничего не найдено.\n\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                reply_markup=create_menu()
+            )
+            return
         
         response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
         for i, res in enumerate(search_results, 1):
@@ -343,7 +247,10 @@ def process_text_question(message):
             
             response_text += f"<b>{i}. {title}</b>\n"
             response_text += f"<i>{res['snippet']}</i>\n"
-            response_text += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
+            if res['url'] != "#":
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n\n"
+            else:
+                response_text += "\n"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -352,7 +259,7 @@ def process_text_question(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=False,  # Разрешаем превью
+            disable_web_page_preview=False,
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
@@ -418,7 +325,10 @@ def handle_photo(message):
             
             response_text += f"<b>{i}. {title}</b>\n"
             response_text += f"<i>{res['snippet']}</i>\n"
-            response_text += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
+            if res['url'] != "#":
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n\n"
+            else:
+                response_text += "\n"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -427,7 +337,7 @@ def handle_photo(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=False,  # Разрешаем превью
+            disable_web_page_preview=False,
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
@@ -518,7 +428,7 @@ def configure_webhook():
                 # Устанавливаем новый вебхук в фоновом потоке
                 def set_webhook_background():
                     import time
-                    time.sleep(3)  # Короткая задержка
+                    time.sleep(3)
                     try:
                         bot.set_webhook(url=webhook_url)
                         logger.info(f"Вебхук установлен: {webhook_url}")
@@ -529,7 +439,6 @@ def configure_webhook():
                     except Exception as e:
                         logger.error(f"Ошибка установки вебхука: {str(e)}")
                 
-                # Запускаем в отдельном потоке
                 thread = threading.Thread(target=set_webhook_background)
                 thread.daemon = True
                 thread.start()
