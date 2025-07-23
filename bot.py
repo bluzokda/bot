@@ -3,12 +3,13 @@ import telebot
 import requests
 import logging
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 import io
 from bs4 import BeautifulSoup
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
+import re
 
 # Настройка логирования
 logging.basicConfig(
@@ -37,9 +38,9 @@ except Exception as e:
     raise
 
 # Настройки поиска
-SEARCH_URL = "https://www.google.com/search?q={}&hl=ru"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 # Хранение истории (в памяти; для продакшена используйте базу данных)
@@ -53,13 +54,42 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def google_search(query):
-    """Выполняет поиск в Google и возвращает топ-3 результата"""
+def search_internet(query):
+    """Ищет информацию по запросу в нескольких источниках"""
     try:
         logger.info(f"Поисковый запрос: {query}")
-        formatted_query = query.replace(" ", "+")
+        
+        # Пробуем разные поисковые системы
+        results = google_search(query)
+        if not results or len(results) < 3:
+            ddg_results = duckduckgo_search(query)
+            if ddg_results:
+                # Объединяем результаты, если есть
+                results = (results or []) + ddg_results
+        
+        if not results:
+            return None
+        
+        # Фильтруем результаты с пустыми заголовками
+        filtered_results = []
+        for res in results:
+            if res['title'].strip() and res['url'].strip() and not res['url'].startswith('https://www.google.com/'):
+                filtered_results.append(res)
+                if len(filtered_results) >= 5:  # Ограничиваем 5 результатами
+                    break
+        
+        return filtered_results
+        
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {str(e)}")
+        return None
+
+def google_search(query):
+    """Поиск в Google"""
+    try:
+        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
         response = requests.get(
-            SEARCH_URL.format(formatted_query), 
+            f"https://www.google.com/search?q={formatted_query}&hl=ru", 
             headers=HEADERS, 
             timeout=15
         )
@@ -68,41 +98,94 @@ def google_search(query):
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
         
-        # Поиск результатов
-        result_blocks = soup.find_all('div', class_='tF2Cxc') or soup.find_all('div', class_='MjjYud') or soup.find_all('div', class_='g')
+        # Селекторы для Google
+        result_blocks = soup.select('div.g') or soup.select('div.tF2Cxc') or soup.select('div.MjjYud')
         
-        for block in result_blocks[:3]:  # Берем первые 3 результата
+        for block in result_blocks[:8]:  # Берем больше результатов для фильтрации
             # Извлечение заголовка
-            title_elem = block.find('h3') or block.find('h3', class_='LC20lb') or block.find('div', role='heading')
-            title = title_elem.get_text(strip=True) if title_elem else "Без названия"
+            title_elem = block.select_one('h3') or block.select_one('.LC20lb') or block.select_one('.DKV0Hd')
+            title = title_elem.get_text(strip=True) if title_elem else ""
             
             # Извлечение ссылки
             link_elem = block.find('a', href=True)
+            link = ""
             if link_elem:
                 link = link_elem['href']
                 if link.startswith('/url?q='):
                     link = link[7:].split('&')[0]
-            else:
-                link = "#"
+                elif link.startswith('/search?'):
+                    continue  # Пропускаем внутренние ссылки Google
             
             # Извлечение описания
-            snippet_elem = block.find('div', class_='VwiC3b') or block.find('div', class_='yXK7lf') or block.find('span', class_='aCOpRe')
+            snippet_elem = block.select_one('.VwiC3b') or block.select_one('.lEBKkf') or block.select_one('.hgKElc') or block.select_one('.IsZvec')
             snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
             
+            # Пропускаем рекламные результаты
+            if "google" in link or "doubleclick" in link or not link:
+                continue
+                
             results.append({
                 "title": title,
                 "url": link,
                 "snippet": snippet
             })
         
-        logger.info(f"Найдено результатов: {len(results)}")
-        return results if results else None
+        logger.info(f"Google найдено результатов: {len(results)}")
+        return results
         
-    except requests.exceptions.Timeout:
-        logger.warning("Таймаут запроса к Google")
-        return [{"title": "⏱️ Таймаут запроса", "snippet": "Google не ответил вовремя", "url": ""}]
     except Exception as e:
-        logger.error(f"Ошибка поиска: {str(e)}")
+        logger.error(f"Ошибка Google поиска: {str(e)}")
+        return None
+
+def duckduckgo_search(query):
+    """Поиск в DuckDuckGo как резервный вариант"""
+    try:
+        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
+        response = requests.get(
+            f"https://html.duckduckgo.com/html/?q={formatted_query}", 
+            headers=HEADERS, 
+            timeout=15
+        )
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+        
+        # Парсинг результатов DuckDuckGo
+        result_blocks = soup.select('.result') or soup.select('.web-result')
+        
+        for block in result_blocks[:5]:
+            # Извлечение заголовка
+            title_elem = block.select_one('.result__a') or block.select_one('.web-result__title')
+            title = title_elem.get_text(strip=True) if title_elem else ""
+            
+            # Извлечение ссылки
+            link = ""
+            if title_elem and title_elem.has_attr('href'):
+                link = title_elem['href']
+                if link.startswith('//duckduckgo.com'):
+                    continue
+                if link.startswith('//'):
+                    link = "https:" + link
+            
+            # Извлечение описания
+            snippet_elem = block.select_one('.result__snippet') or block.select_one('.web-result__description')
+            snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
+            
+            if not title or not link:
+                continue
+                
+            results.append({
+                "title": title,
+                "url": link,
+                "snippet": snippet
+            })
+        
+        logger.info(f"DuckDuckGo найдено результатов: {len(results)}")
+        return results
+        
+    except Exception as e:
+        logger.error(f"Ошибка DuckDuckGo поиска: {str(e)}")
         return None
 
 def save_history(user_id, question, response):
@@ -120,10 +203,39 @@ def save_history(user_id, question, response):
     })
 
 def process_image(image_data):
-    """Распознает текст на изображении с помощью OCR"""
+    """Распознает текст на изображении с помощью OCR с предобработкой"""
     try:
         image = Image.open(io.BytesIO(image_data))
-        text = pytesseract.image_to_string(image, lang='rus+eng')
+        
+        # Конвертация в градации серого
+        if image.mode != 'L':
+            image = image.convert('L')
+        
+        # Автоконтраст
+        image = ImageOps.autocontrast(image, cutoff=5)
+        
+        # Увеличение контраста
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2.0)
+        
+        # Увеличение резкости
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(2.0)
+        
+        # Бинаризация (пороговое преобразование)
+        threshold = 160
+        image = image.point(lambda p: p > threshold and 255)
+        
+        # Масштабирование для мелкого текста
+        if min(image.size) < 1000:
+            scale_factor = max(2000 / min(image.size), 1.5)
+            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
+            image = image.resize(new_size, Image.LANCZOS)
+        
+        # Распознаем текст с параметрами для улучшения точности
+        custom_config = r'--oem 3 --psm 6 -l rus+eng'
+        text = pytesseract.image_to_string(image, config=custom_config)
+        
         logger.info(f"Распознано символов: {len(text)}")
         return text.strip()
     except Exception as e:
@@ -140,7 +252,11 @@ def send_welcome(message):
             "• Искать ответы на текстовые вопросы\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n\n"
-            "Просто отправь мне вопрос или фотографию с заданием!"
+            "📌 Советы для лучшего результата:\n"
+            "1. Формулируйте вопросы четко\n"
+            "2. Фотографируйте текст при хорошем освещении\n"
+            "3. Держите камеру параллельно тексту\n\n"
+            "Попробуй отправить мне вопрос или фотографию с заданием!"
         )
         bot.send_message(
             message.chat.id,
@@ -169,7 +285,7 @@ def handle_ask_question(message):
 def handle_ask_photo(message):
     try:
         logger.info(f"Запрос на отправку фото от {message.chat.id}")
-        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:", reply_markup=None)
+        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием (сфокусируйтесь на тексте, хорошее освещение):", reply_markup=None)
     except Exception as e:
         logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
@@ -180,11 +296,15 @@ def process_text_question(message):
         question = message.text
         logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
         
+        if len(question) < 3:
+            bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
+            return
+            
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
         
         # Ищем ответ
-        search_results = google_search(question)
+        search_results = search_internet(question)
         
         if not search_results:
             bot.send_message(chat_id, "❌ По вашему запросу ничего не найдено. Попробуйте переформулировать вопрос.", reply_markup=create_menu())
@@ -192,7 +312,10 @@ def process_text_question(message):
         
         response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
         for i, res in enumerate(search_results, 1):
-            response_text += f"<b>{i}. {res['title']}</b>\n"
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            
+            response_text += f"<b>{i}. {title}</b>\n"
             response_text += f"<i>{res['snippet']}</i>\n"
             response_text += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
         
@@ -228,8 +351,8 @@ def handle_photo(message):
         # Распознаем текст
         text = process_image(file_data)
         
-        if not text:
-            bot.send_message(chat_id, "❌ Не удалось распознать текст на фото. Попробуйте другое изображение.", reply_markup=create_menu())
+        if not text or len(text) < 10:
+            bot.send_message(chat_id, "❌ Не удалось распознать текст на фото. Попробуйте другое изображение (лучшее освещение, четкий текст).", reply_markup=create_menu())
             return
         
         # Обрезаем длинный текст для отображения
@@ -244,7 +367,7 @@ def handle_photo(message):
         
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
-        search_results = google_search(text)
+        search_results = search_internet(text)
         
         if not search_results:
             bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
@@ -252,7 +375,10 @@ def handle_photo(message):
         
         response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
         for i, res in enumerate(search_results, 1):
-            response_text += f"<b>{i}. {res['title']}</b>\n"
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            
+            response_text += f"<b>{i}. {title}</b>\n"
             response_text += f"<i>{res['snippet']}</i>\n"
             response_text += f"<a href='{res['url']}'>🔗 Источник</a>\n\n"
         
