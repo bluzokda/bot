@@ -33,12 +33,17 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 }
 
-# Хранение истории (в реальном проекте используйте базу данных)
+# Хранение истории
 user_history = {}
 
-# Путь к Tesseract OCR (для Render)
+# Настройка пути к Tesseract OCR
 if os.environ.get('RENDER'):
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+    logger.info("Настройка Tesseract для Render.com")
+else:
+    # Для локальной разработки (измените путь при необходимости)
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    logger.info("Настройка Tesseract для локальной среды")
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
@@ -56,14 +61,14 @@ def google_search(query):
         response = requests.get(
             SEARCH_URL.format(formatted_query), 
             headers=HEADERS, 
-            timeout=10
+            timeout=15
         )
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
         
-        # Поиск результатов по разным возможным селекторам
+        # Поиск результатов
         result_blocks = soup.find_all('div', class_='tF2Cxc') or soup.find_all('div', class_='MjjYud') or soup.find_all('div', class_='g')
         
         for block in result_blocks[:3]:  # Берем первые 3 результата
@@ -82,7 +87,7 @@ def google_search(query):
             
             # Извлечение описания
             snippet_elem = block.find('div', class_='VwiC3b') or block.find('div', class_='yXK7lf') or block.find('span', class_='aCOpRe')
-            snippet = snippet_elem.get_text(strip=True)[:300] if snippet_elem else "Описание отсутствует"
+            snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
             
             results.append({
                 "title": title,
@@ -175,7 +180,10 @@ def process_text_question(message):
         question = message.text
         logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
         
+        # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
+        
+        # Ищем ответ
         search_results = google_search(question)
         
         if not search_results:
@@ -283,8 +291,8 @@ def handle_history(message):
             
             response += f"<b>{i}. Вопрос:</b> {question}\n"
             # Показываем первый результат из ответа
-            first_result = item['response'].split('\n\n')[0] if '\n\n' in item['response'] else item['response'][:100]
-            response += f"<b>Ответ:</b> {first_result}...\n"
+            first_result = item['response'].split('\n\n')[0] if '\n\n' in item['response'] else item['response'][:100] + "..."
+            response += f"<b>Ответ:</b> {first_result}\n"
             response += "─" * 20 + "\n\n"
         
         bot.send_message(
@@ -298,7 +306,59 @@ def handle_history(message):
         logger.error(f"Ошибка в handle_history: {str(e)}")
         bot.send_message(chat_id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
 
-# ... (остальной код без изменений - Flask роуты, webhook, запуск)
+@app.route('/')
+def home():
+    return "🤖 Telegram Study Bot активен! Используйте /start в Telegram"
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_data = request.get_json()
+            logger.info("Получен webhook-запрос")
+            
+            update = telebot.types.Update.de_json(json_data)
+            bot.process_new_updates([update])
+            return '', 200
+        return 'Bad request', 400
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {str(e)}")
+        return 'Server error', 500
+
+def configure_webhook():
+    """Настраивает вебхук при запуске приложения"""
+    try:
+        # Для Render.com
+        if os.environ.get('RENDER'):
+            external_url = os.environ.get('RENDER_EXTERNAL_URL')
+            if external_url:
+                webhook_url = f"{external_url}/webhook"
+                
+                # Удаляем существующий вебхук перед установкой нового
+                bot.remove_webhook()
+                
+                # Даем время для снятия вебхука
+                import time; time.sleep(1)
+                
+                # Устанавливаем новый вебхук
+                bot.set_webhook(url=webhook_url)
+                logger.info(f"Вебхук установлен: {webhook_url}")
+                
+                # Проверяем информацию о вебхуке
+                webhook_info = bot.get_webhook_info()
+                logger.info(f"Информация о вебхуке: {webhook_info}")
+                return
+            else:
+                logger.warning("RENDER_EXTERNAL_URL не найден!")
+        
+        # Для других платформ/локального запуска
+        bot.remove_webhook()
+        logger.info("Вебхук удален, используется polling")
+    except Exception as e:
+        logger.error(f"Ошибка настройки вебхука: {str(e)}")
+
+# Установка вебхука после определения всех обработчиков
+configure_webhook()
 
 if __name__ == '__main__':
     # Локальный запуск
