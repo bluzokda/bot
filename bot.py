@@ -8,6 +8,7 @@ import io
 from bs4 import BeautifulSoup
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+import threading
 
 # Настройка логирования
 logging.basicConfig(
@@ -334,19 +335,36 @@ def configure_webhook():
             if external_url:
                 webhook_url = f"{external_url}/webhook"
                 
+                # Проверка доступности бота
+                try:
+                    bot.get_me()
+                    logger.info("Бот доступен, устанавливаем вебхук")
+                except Exception as e:
+                    logger.error(f"Ошибка доступа к боту: {str(e)}")
+                    return
+                
                 # Удаляем существующий вебхук перед установкой нового
                 bot.remove_webhook()
+                logger.info("Старый вебхук удален")
                 
-                # Даем время для снятия вебхука
-                import time; time.sleep(1)
+                # Устанавливаем новый вебхук в фоновом потоке
+                def set_webhook_background():
+                    import time
+                    time.sleep(3)  # Короткая задержка
+                    try:
+                        bot.set_webhook(url=webhook_url)
+                        logger.info(f"Вебхук установлен: {webhook_url}")
+                        
+                        # Проверяем информацию о вебхуке
+                        webhook_info = bot.get_webhook_info()
+                        logger.info(f"Информация о вебхуке: {webhook_info}")
+                    except Exception as e:
+                        logger.error(f"Ошибка установки вебхука: {str(e)}")
                 
-                # Устанавливаем новый вебхук
-                bot.set_webhook(url=webhook_url)
-                logger.info(f"Вебхук установлен: {webhook_url}")
-                
-                # Проверяем информацию о вебхуке
-                webhook_info = bot.get_webhook_info()
-                logger.info(f"Информация о вебхуке: {webhook_info}")
+                # Запускаем в отдельном потоке
+                thread = threading.Thread(target=set_webhook_background)
+                thread.daemon = True
+                thread.start()
                 return
             else:
                 logger.warning("RENDER_EXTERNAL_URL не найден!")
@@ -359,6 +377,11 @@ def configure_webhook():
 
 # Установка вебхука после определения всех обработчиков
 configure_webhook()
+
+@app.route('/health')
+def health_check():
+    """Endpoint для проверки работоспособности"""
+    return "OK", 200
 
 if __name__ == '__main__':
     # Локальный запуск
