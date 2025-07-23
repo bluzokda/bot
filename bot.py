@@ -3,13 +3,14 @@ import telebot
 import requests
 import logging
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import io
 from bs4 import BeautifulSoup
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import re
+import time
 
 # Настройка логирования
 logging.basicConfig(
@@ -40,10 +41,13 @@ except Exception as e:
 # Настройки поиска
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Referer": "https://www.google.com/",
+    "DNT": "1",
 }
 
-# Хранение истории (в памяти; для продакшена используйте базу данных)
+# Хранение истории
 user_history = {}
 
 def create_menu():
@@ -62,6 +66,7 @@ def search_internet(query):
         # Пробуем разные поисковые системы
         results = google_search(query)
         if not results or len(results) < 3:
+            logger.info("Пробуем DuckDuckGo как резервный вариант")
             ddg_results = duckduckgo_search(query)
             if ddg_results:
                 # Объединяем результаты, если есть
@@ -85,7 +90,7 @@ def search_internet(query):
         return None
 
 def google_search(query):
-    """Поиск в Google"""
+    """Поиск в Google с улучшенными селекторами"""
     try:
         formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
         response = requests.get(
@@ -98,12 +103,12 @@ def google_search(query):
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
         
-        # Селекторы для Google
+        # Новые актуальные селекторы для Google (июль 2025)
         result_blocks = soup.select('div.g') or soup.select('div.tF2Cxc') or soup.select('div.MjjYud')
         
-        for block in result_blocks[:8]:  # Берем больше результатов для фильтрации
-            # Извлечение заголовка
-            title_elem = block.select_one('h3') or block.select_one('.LC20lb') or block.select_one('.DKV0Hd')
+        for block in result_blocks[:8]:
+            # Извлечение заголовка - новые селекторы
+            title_elem = block.select_one('h3, .LC20lb, .DKV0Hd, .zBAuLc, .lEBKkf')
             title = title_elem.get_text(strip=True) if title_elem else ""
             
             # Извлечение ссылки
@@ -113,15 +118,15 @@ def google_search(query):
                 link = link_elem['href']
                 if link.startswith('/url?q='):
                     link = link[7:].split('&')[0]
-                elif link.startswith('/search?'):
+                elif link.startswith('/search?') or link.startswith('https://www.google.com/'):
                     continue  # Пропускаем внутренние ссылки Google
             
-            # Извлечение описания
-            snippet_elem = block.select_one('.VwiC3b') or block.select_one('.lEBKkf') or block.select_one('.hgKElc') or block.select_one('.IsZvec')
+            # Извлечение описания - новые селекторы
+            snippet_elem = block.select_one('.VwiC3b, .lEBKkf, .hgKElc, .IsZvec, .MUxGbd')
             snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
             
-            # Пропускаем рекламные результаты
-            if "google" in link or "doubleclick" in link or not link:
+            # Пропускаем рекламные и пустые результаты
+            if not title or "google" in link or "doubleclick" in link or not link:
                 continue
                 
             results.append({
@@ -152,24 +157,24 @@ def duckduckgo_search(query):
         results = []
         
         # Парсинг результатов DuckDuckGo
-        result_blocks = soup.select('.result') or soup.select('.web-result')
+        result_blocks = soup.select('.result, .web-result')
         
         for block in result_blocks[:5]:
             # Извлечение заголовка
-            title_elem = block.select_one('.result__a') or block.select_one('.web-result__title')
+            title_elem = block.select_one('.result__a, .web-result__title')
             title = title_elem.get_text(strip=True) if title_elem else ""
             
             # Извлечение ссылки
             link = ""
             if title_elem and title_elem.has_attr('href'):
                 link = title_elem['href']
-                if link.startswith('//duckduckgo.com'):
+                if link.startswith('//duckduckgo.com') or not link:
                     continue
                 if link.startswith('//'):
                     link = "https:" + link
             
             # Извлечение описания
-            snippet_elem = block.select_one('.result__snippet') or block.select_one('.web-result__description')
+            snippet_elem = block.select_one('.result__snippet, .web-result__description')
             snippet = snippet_elem.get_text(strip=True)[:300] + "..." if snippet_elem else "Описание отсутствует"
             
             if not title or not link:
@@ -203,7 +208,7 @@ def save_history(user_id, question, response):
     })
 
 def process_image(image_data):
-    """Распознает текст на изображении с помощью OCR с предобработкой"""
+    """Распознает текст на изображении с улучшенной предобработкой"""
     try:
         image = Image.open(io.BytesIO(image_data))
         
@@ -212,32 +217,42 @@ def process_image(image_data):
             image = image.convert('L')
         
         # Автоконтраст
-        image = ImageOps.autocontrast(image, cutoff=5)
+        image = ImageOps.autocontrast(image, cutoff=10)
         
         # Увеличение контраста
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.0)
+        image = enhancer.enhance(2.5)
         
         # Увеличение резкости
         enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(2.0)
+        image = enhancer.enhance(3.0)
         
-        # Бинаризация (пороговое преобразование)
-        threshold = 160
-        image = image.point(lambda p: p > threshold and 255)
+        # Легкое размытие для уменьшения шума
+        image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
+        
+        # Бинаризация (адаптивное пороговое преобразование)
+        image = ImageOps.autocontrast(image)
+        image = image.point(lambda p: 255 if p > 160 else 0)
         
         # Масштабирование для мелкого текста
         if min(image.size) < 1000:
-            scale_factor = max(2000 / min(image.size), 1.5)
+            scale_factor = max(2500 / min(image.size), 2.5)
             new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
             image = image.resize(new_size, Image.LANCZOS)
         
-        # Распознаем текст с параметрами для улучшения точности
+        # Повышение резкости после масштабирования
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(2.0)
+        
+        # Распознаем текст с оптимальными параметрами
         custom_config = r'--oem 3 --psm 6 -l rus+eng'
         text = pytesseract.image_to_string(image, config=custom_config)
         
+        # Очистка текста
+        text = re.sub(r'\s+', ' ', text).strip()
+        
         logger.info(f"Распознано символов: {len(text)}")
-        return text.strip()
+        return text
     except Exception as e:
         logger.error(f"Ошибка OCR: {str(e)}")
         return None
@@ -247,15 +262,16 @@ def send_welcome(message):
     try:
         logger.info(f"Обработка команды /start от {message.chat.id}")
         response = (
-            "👋 Ахуел?\n\n"
+            "👋 Привет! Я твой бот-помощник для учебы!\n\n"
             "Я умею:\n"
             "• Искать ответы на текстовые вопросы\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n\n"
             "📌 Советы для лучшего результата:\n"
-            "1. Формулируйте вопросы четко\n"
+            "1. Формулируйте вопросы четко (например: 'Что такое теорема Пифагора?')\n"
             "2. Фотографируйте текст при хорошем освещении\n"
-            "3. Держите камеру параллельно тексту\n\n"
+            "3. Держите камеру параллельно тексту\n"
+            "4. Убедитесь, что текст занимает большую часть кадра\n\n"
             "Попробуй отправить мне вопрос или фотографию с заданием!"
         )
         bot.send_message(
@@ -275,7 +291,7 @@ def handle_help(message):
 def handle_ask_question(message):
     try:
         logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
-        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
+        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос (например: 'Что такое фотосинтез?'):", reply_markup=None)
         bot.register_next_step_handler(msg, process_text_question)
     except Exception as e:
         logger.error(f"Ошибка в handle_ask_question: {str(e)}")
@@ -285,7 +301,7 @@ def handle_ask_question(message):
 def handle_ask_photo(message):
     try:
         logger.info(f"Запрос на отправку фото от {message.chat.id}")
-        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием (сфокусируйтесь на тексте, хорошее освещение):", reply_markup=None)
+        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:\n\n• Сфокусируйтесь на тексте\n• Обеспечьте хорошее освещение\n• Держите камеру параллельно тексту", reply_markup=None)
     except Exception as e:
         logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
@@ -307,8 +323,18 @@ def process_text_question(message):
         search_results = search_internet(question)
         
         if not search_results:
-            bot.send_message(chat_id, "❌ По вашему запросу ничего не найдено. Попробуйте переформулировать вопрос.", reply_markup=create_menu())
-            return
+            # Попробуем найти ответ без спецсимволов
+            clean_question = re.sub(r'[^\w\s]', '', question)
+            if clean_question != question:
+                search_results = search_internet(clean_question)
+            
+            if not search_results:
+                bot.send_message(
+                    chat_id, 
+                    "❌ По вашему запросу ничего не найдено.\n\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                    reply_markup=create_menu()
+                )
+                return
         
         response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
         for i, res in enumerate(search_results, 1):
@@ -326,7 +352,7 @@ def process_text_question(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,
+            disable_web_page_preview=False,  # Разрешаем превью
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
@@ -349,10 +375,17 @@ def handle_photo(message):
         bot.send_chat_action(chat_id, 'typing')
         
         # Распознаем текст
+        start_time = time.time()
         text = process_image(file_data)
+        elapsed_time = time.time() - start_time
+        logger.info(f"OCR занял {elapsed_time:.2f} секунд")
         
         if not text or len(text) < 10:
-            bot.send_message(chat_id, "❌ Не удалось распознать текст на фото. Попробуйте другое изображение (лучшее освещение, четкий текст).", reply_markup=create_menu())
+            bot.send_message(
+                chat_id, 
+                "❌ Не удалось распознать текст на фото.\n\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
+                reply_markup=create_menu()
+            )
             return
         
         # Обрезаем длинный текст для отображения
@@ -370,8 +403,13 @@ def handle_photo(message):
         search_results = search_internet(text)
         
         if not search_results:
-            bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
-            return
+            # Попробуем найти по ключевым словам
+            keywords = ' '.join(text.split()[:10])
+            search_results = search_internet(keywords)
+            
+            if not search_results:
+                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
+                return
         
         response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
         for i, res in enumerate(search_results, 1):
@@ -389,7 +427,7 @@ def handle_photo(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,
+            disable_web_page_preview=False,  # Разрешаем превью
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
