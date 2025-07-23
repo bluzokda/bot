@@ -28,23 +28,22 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
 
+# Проверка доступности Tesseract
+try:
+    tesseract_version = pytesseract.get_tesseract_version()
+    logger.info(f"Tesseract version: {tesseract_version}")
+except Exception as e:
+    logger.error(f"Tesseract check failed: {str(e)}")
+    raise
+
 # Настройки поиска
 SEARCH_URL = "https://www.google.com/search?q={}&hl=ru"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 }
 
-# Хранение истории
+# Хранение истории (в памяти; для продакшена используйте базу данных)
 user_history = {}
-
-# Настройка пути к Tesseract OCR
-if os.environ.get('RENDER'):
-    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-    logger.info("Настройка Tesseract для Render.com")
-else:
-    # Для локальной разработки (измените путь при необходимости)
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    logger.info("Настройка Tesseract для локальной среды")
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
@@ -311,6 +310,11 @@ def handle_history(message):
 def home():
     return "🤖 Telegram Study Bot активен! Используйте /start в Telegram"
 
+@app.route('/health')
+def health_check():
+    """Endpoint для проверки работоспособности"""
+    return "OK", 200
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -377,11 +381,6 @@ def configure_webhook():
 
 # Установка вебхука после определения всех обработчиков
 configure_webhook()
-
-@app.route('/health')
-def health_check():
-    """Endpoint для проверки работоспособности"""
-    return "OK", 200
 
 if __name__ == '__main__':
     # Локальный запуск
