@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
 
 # Настройка переменных окружения
 ENV PYTESSERACT_TESSERACT_CMD=/usr/bin/tesseract
+ENV TELEGRAM_BOT_TOKEN="7452800190:AAGGWsVqA92kf6n3BJJ9ODpEyghKA_2T7Do"
+ENV DEEPSEEK_API_KEY="sk-b27a98faf13d415685705ed4d0713099"
 
 # Рабочая директория
 WORKDIR /app
