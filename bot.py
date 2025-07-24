@@ -3,14 +3,16 @@ import telebot
 import requests
 import logging
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from PIL import Image, ImageEnhance, ImageOps
 import io
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import re
 import time
+import math
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,9 +25,14 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY')
+
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+
+if not DEEPSEEK_API_KEY:
+    logger.warning("DEEPSEEK_API_KEY не установлен! Будет использоваться только поиск")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
@@ -38,15 +45,9 @@ except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
 
-# Настройки поиска
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-}
-
 # Хранение истории
 user_history = {}
+image_executor = ThreadPoolExecutor(max_workers=2)
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
@@ -56,113 +57,84 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_internet(query):
-    """Ищет информацию по запросу через DuckDuckGo API"""
+def ask_deepseek(prompt, is_image=False):
+    """Запрашивает ответ у DeepSeek API"""
+    if not DEEPSEEK_API_KEY:
+        return None
+        
     try:
-        logger.info(f"Поисковый запрос: {query}")
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
         
-        # Форматируем запрос для API
-        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
-        url = f"https://api.duckduckgo.com/?q={formatted_query}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты полезный учебный помощник. Отвечай точно и информативно. Форматируй ответы с использованием HTML."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 2000
+        }
         
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        # Для изображений используем другую модель
+        if is_image:
+            payload["model"] = "deepseek-vision"
+        
+        response = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        
         response.raise_for_status()
         data = response.json()
         
-        results = []
-        
-        # Основной результат
-        if data.get("AbstractText"):
-            results.append({
-                "title": data.get("Heading", "Основной результат"),
-                "url": data.get("AbstractURL", "#"),
-                "snippet": data.get("AbstractText", "Описание отсутствует")
-            })
-        
-        # Похожие темы
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if "FirstURL" in topic and "Text" in topic:
-                results.append({
-                    "title": topic["Text"].split(" — ")[0],
-                    "url": topic["FirstURL"],
-                    "snippet": topic["Text"]
-                })
-        
-        # Результаты из внешних источников
-        for result in data.get("Results", [])[:5]:
-            results.append({
-                "title": result.get("Text", "Без названия"),
-                "url": result.get("FirstURL", "#"),
-                "snippet": result.get("Text", "Описание отсутствует")
-            })
-        
-        logger.info(f"Найдено результатов: {len(results)}")
-        return results if results else None
-        
+        if "choices" in data and len(data["choices"]) > 0:
+            return data["choices"][0]["message"]["content"]
+            
     except Exception as e:
-        logger.error(f"Ошибка поиска: {str(e)}")
-        return None
-
-def save_history(user_id, question, response):
-    """Сохраняет историю запросов пользователя"""
-    if user_id not in user_history:
-        user_history[user_id] = []
+        logger.error(f"DeepSeek API error: {str(e)}")
     
-    # Сохраняем только последние 10 записей
-    if len(user_history[user_id]) >= 10:
-        user_history[user_id].pop(0)
-    
-    user_history[user_id].append({
-        "question": question,
-        "response": response
-    })
+    return None
 
 def process_image(image_data):
-    """Распознает текст на изображении с улучшенной предобработкой"""
+    """Оптимизированное распознавание текста на изображении"""
     try:
         image = Image.open(io.BytesIO(image_data))
+        image = image.copy()
         
         # Конвертация в градации серого
         if image.mode != 'L':
             image = image.convert('L')
         
-        # Автоконтраст
-        image = ImageOps.autocontrast(image, cutoff=10)
-        
-        # Увеличение контраста
+        # Умеренное улучшение контраста
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.5)
+        image = enhancer.enhance(1.8)
         
-        # Увеличение резкости
-        enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(3.0)
-        
-        # Легкое размытие для уменьшения шума
-        image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        
-        # Бинаризация (адаптивное пороговое преобразование)
-        image = ImageOps.autocontrast(image)
-        image = image.point(lambda p: 255 if p > 160 else 0)
-        
-        # Масштабирование для мелкого текста
-        if min(image.size) < 1000:
-            scale_factor = max(2500 / min(image.size), 2.5)
+        # Масштабирование только для мелких изображений
+        if min(image.size) < 500:
+            scale_factor = max(1000 / min(image.size), 1.8)
             new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
             image = image.resize(new_size, Image.LANCZOS)
         
-        # Повышение резкости после масштабирования
-        enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(2.0)
-        
-        # Распознаем текст с оптимальными параметрами
-        custom_config = r'--oem 3 --psm 6 -l rus+eng'
+        # Распознаем текст с оптимизированными параметрами
+        custom_config = r'--oem 1 --psm 6 -l rus+eng'
         text = pytesseract.image_to_string(image, config=custom_config)
         
         # Очистка текста
         text = re.sub(r'\s+', ' ', text).strip()
         
         logger.info(f"Распознано символов: {len(text)}")
-        return text
+        return text if len(text) > 5 else None
     except Exception as e:
         logger.error(f"Ошибка OCR: {str(e)}")
         return None
@@ -172,17 +144,12 @@ def send_welcome(message):
     try:
         logger.info(f"Обработка команды /start от {message.chat.id}")
         response = (
-            "👋 Привет! Я твой бот-помощник для учебы!\n\n"
-            "Я умею:\n"
-            "• Искать ответы на текстовые вопросы\n"
-            "• Распознавать текст с фотографий\n"
-            "• Помогать с учебными материалами\n\n"
-            "📌 Советы для лучшего результата:\n"
-            "1. Формулируйте вопросы четко (например: 'Что такое фотосинтез?')\n"
-            "2. Фотографируйте текст при хорошем освещении\n"
-            "3. Держите камеру параллельно тексту\n"
-            "4. Убедитесь, что текст занимает большую часть кадра\n\n"
-            "Попробуй отправить мне вопрос или фотографию с заданием!"
+            "👋 Привет! Я твой умный бот-помощник для учебы!\n\n"
+            "Я использую продвинутый ИИ для ответов на вопросы. Могу помочь с:\n"
+            "• Текстовыми вопросами по любой теме\n"
+            "• Распознаванием и анализом фотографий\n"
+            "• Поиском учебных материалов\n\n"
+            "📌 Просто задай вопрос или отправь фото с заданием!"
         )
         bot.send_message(
             message.chat.id,
@@ -201,7 +168,7 @@ def handle_help(message):
 def handle_ask_question(message):
     try:
         logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
-        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос (например: 'Что такое фотосинтез?'):", reply_markup=None)
+        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
         bot.register_next_step_handler(msg, process_text_question)
     except Exception as e:
         logger.error(f"Ошибка в handle_ask_question: {str(e)}")
@@ -211,7 +178,7 @@ def handle_ask_question(message):
 def handle_ask_photo(message):
     try:
         logger.info(f"Запрос на отправку фото от {message.chat.id}")
-        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:\n\n• Сфокусируйтесь на тексте\n• Обеспечьте хорошее освещение\n• Держите камеру параллельно тексту", reply_markup=None)
+        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:", reply_markup=None)
     except Exception as e:
         logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
@@ -226,46 +193,106 @@ def process_text_question(message):
             bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
             return
             
-        # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
         
-        # Ищем ответ
-        search_results = search_internet(question)
+        # Запрос к DeepSeek
+        ai_response = ask_deepseek(question)
         
-        if not search_results:
+        if ai_response:
+            # Форматируем ответ
+            formatted_response = f"<b>🤖 Ответ от DeepSeek:</b>\n\n{ai_response}"
+            
+            # Сохраняем в историю
+            if chat_id not in user_history:
+                user_history[chat_id] = []
+            user_history[chat_id].append({
+                "question": question,
+                "response": formatted_response
+            })
+            
+            # Отправляем ответ
+            bot.send_message(
+                chat_id,
+                formatted_response,
+                parse_mode='HTML',
+                reply_markup=create_menu()
+            )
+            logger.info("Ответ от DeepSeek отправлен")
+        else:
+            bot.send_message(
+                chat_id,
+                "⚠️ Не удалось получить ответ. Попробуйте еще раз.",
+                reply_markup=create_menu()
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка в process_text_question: {str(e)}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
+
+def process_image_async(file_data):
+    """Асинхронная обработка изображения"""
+    try:
+        start_time = time.time()
+        text = process_image(file_data)
+        elapsed_time = time.time() - start_time
+        logger.info(f"OCR занял {elapsed_time:.2f} секунд")
+        return text
+    except Exception as e:
+        logger.error(f"Ошибка в process_image_async: {str(e)}")
+        return None
+
+def handle_photo_result(future, message):
+    """Обработка результата распознавания"""
+    try:
+        chat_id = message.chat.id
+        text = future.result()
+        
+        if not text:
             bot.send_message(
                 chat_id, 
-                "❌ По вашему запросу ничего не найдено.\n\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                "❌ Не удалось распознать текст на фото. Попробуйте другое изображение.",
                 reply_markup=create_menu()
             )
             return
         
-        response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
-        for i, res in enumerate(search_results, 1):
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+        # Отправляем запрос в DeepSeek с распознанным текстом
+        bot.send_message(chat_id, "🤖 Анализирую содержание...")
+        prompt = f"Пользователь отправил фотографию с текстом. Проанализируй содержание и дай развернутый ответ:\n\n{text}"
+        ai_response = ask_deepseek(prompt, is_image=True)
+        
+        if ai_response:
+            # Форматируем ответ
+            formatted_response = (
+                f"<b>📸 Анализ изображения:</b>\n\n"
+                f"<b>Распознанный текст:</b>\n<code>{text[:500]}{'...' if len(text) > 500 else ''}</code>\n\n"
+                f"<b>🤖 Ответ от DeepSeek:</b>\n{ai_response}"
+            )
             
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#":
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n\n"
-            else:
-                response_text += "\n"
+            # Сохраняем в историю
+            if chat_id not in user_history:
+                user_history[chat_id] = []
+            user_history[chat_id].append({
+                "question": f"Фото: {text[:50]}...",
+                "response": formatted_response
+            })
+            
+            # Отправляем ответ
+            bot.send_message(
+                chat_id,
+                formatted_response,
+                parse_mode='HTML',
+                reply_markup=create_menu()
+            )
+        else:
+            bot.send_message(
+                chat_id,
+                "⚠️ Не удалось проанализировать изображение. Попробуйте еще раз.",
+                reply_markup=create_menu()
+            )
         
-        # Сохраняем в историю
-        save_history(chat_id, question, response_text)
-        
-        bot.send_message(
-            chat_id=chat_id,
-            text=response_text,
-            parse_mode='HTML',
-            disable_web_page_preview=False,
-            reply_markup=create_menu()
-        )
-        logger.info("Ответ на текстовый вопрос отправлен")
     except Exception as e:
-        logger.error(f"Ошибка в process_text_question: {str(e)}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
+        logger.error(f"Ошибка обработки фото результата: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
@@ -279,68 +306,10 @@ def handle_photo(message):
         file_data = bot.download_file(file_info.file_path)
         
         bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
-        bot.send_chat_action(chat_id, 'typing')
         
-        # Распознаем текст
-        start_time = time.time()
-        text = process_image(file_data)
-        elapsed_time = time.time() - start_time
-        logger.info(f"OCR занял {elapsed_time:.2f} секунд")
-        
-        if not text or len(text) < 10:
-            bot.send_message(
-                chat_id, 
-                "❌ Не удалось распознать текст на фото.\n\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
-                reply_markup=create_menu()
-            )
-            return
-        
-        # Обрезаем длинный текст для отображения
-        display_text = text[:300] + "..." if len(text) > 300 else text
-        
-        bot.send_message(
-            chat_id,
-            f"📝 Распознанный текст:\n\n<code>{display_text}</code>",
-            parse_mode='HTML',
-            reply_markup=create_menu()
-        )
-        
-        # Ищем ответ по распознанному тексту
-        bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
-        search_results = search_internet(text)
-        
-        if not search_results:
-            # Попробуем найти по ключевым словам
-            keywords = ' '.join(text.split()[:10])
-            search_results = search_internet(keywords)
-            
-            if not search_results:
-                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
-                return
-        
-        response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
-        for i, res in enumerate(search_results, 1):
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#":
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n\n"
-            else:
-                response_text += "\n"
-        
-        # Сохраняем в историю
-        save_history(chat_id, f"Фото: {text[:50]}...", response_text)
-        
-        bot.send_message(
-            chat_id=chat_id,
-            text=response_text,
-            parse_mode='HTML',
-            disable_web_page_preview=False,
-            reply_markup=create_menu()
-        )
-        logger.info("Ответ по фото отправлен")
+        # Отправляем в отдельный поток
+        future = image_executor.submit(process_image_async, file_data)
+        future.add_done_callback(lambda f: handle_photo_result(f, message))
         
     except Exception as e:
         logger.error(f"Ошибка обработки фото: {str(e)}")
@@ -364,9 +333,6 @@ def handle_history(message):
             question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
             
             response += f"<b>{i}. Вопрос:</b> {question}\n"
-            # Показываем первый результат из ответа
-            first_result = item['response'].split('\n\n')[0] if '\n\n' in item['response'] else item['response'][:100] + "..."
-            response += f"<b>Ответ:</b> {first_result}\n"
             response += "─" * 20 + "\n\n"
         
         bot.send_message(
@@ -375,6 +341,16 @@ def handle_history(message):
             parse_mode='HTML',
             reply_markup=create_menu()
         )
+        
+        # Отправляем последний ответ отдельно для удобства
+        last_item = history[-1]
+        bot.send_message(
+            chat_id,
+            f"<b>Последний ответ:</b>\n\n{last_item['response']}",
+            parse_mode='HTML',
+            reply_markup=create_menu()
+        )
+        
         logger.info("История отправлена")
     except Exception as e:
         logger.error(f"Ошибка в handle_history: {str(e)}")
@@ -407,13 +383,11 @@ def webhook():
 def configure_webhook():
     """Настраивает вебхук при запуске приложения"""
     try:
-        # Для Render.com
         if os.environ.get('RENDER'):
             external_url = os.environ.get('RENDER_EXTERNAL_URL')
             if external_url:
                 webhook_url = f"{external_url}/webhook"
                 
-                # Проверка доступности бота
                 try:
                     bot.get_me()
                     logger.info("Бот доступен, устанавливаем вебхук")
@@ -421,19 +395,15 @@ def configure_webhook():
                     logger.error(f"Ошибка доступа к боту: {str(e)}")
                     return
                 
-                # Удаляем существующий вебхук перед установкой нового
                 bot.remove_webhook()
                 logger.info("Старый вебхук удален")
                 
-                # Устанавливаем новый вебхук в фоновом потоке
                 def set_webhook_background():
                     import time
                     time.sleep(3)
                     try:
                         bot.set_webhook(url=webhook_url)
                         logger.info(f"Вебхук установлен: {webhook_url}")
-                        
-                        # Проверяем информацию о вебхуке
                         webhook_info = bot.get_webhook_info()
                         logger.info(f"Информация о вебхуке: {webhook_info}")
                     except Exception as e:
@@ -446,7 +416,6 @@ def configure_webhook():
             else:
                 logger.warning("RENDER_EXTERNAL_URL не найден!")
         
-        # Для других платформ/локального запуска
         bot.remove_webhook()
         logger.info("Вебхук удален, используется polling")
     except Exception as e:
@@ -456,7 +425,6 @@ def configure_webhook():
 configure_webhook()
 
 if __name__ == '__main__':
-    # Локальный запуск
     logger.info("Локальный запуск: используется polling")
     bot.remove_webhook()
     bot.infinity_polling()
