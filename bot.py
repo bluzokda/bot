@@ -8,12 +8,12 @@ import io
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
-import re
 import time
 import base64
 import hashlib
 from collections import deque
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 # Настройка логирования
 logging.basicConfig(
@@ -90,7 +90,12 @@ def ask_deepseek(prompt, image_data=None):
         
     try:
         # Кэширование запросов
-        cache_key = hashlib.md5((prompt + (image_data.decode() if image_data else "")[:100]).hexdigest()
+        cache_str = prompt
+        if image_data:
+            # Для изображений используем первые 100 байт для хэша
+            cache_str += image_data[:100].hex()
+        cache_key = hashlib.md5(cache_str.encode('utf-8')).hexdigest()
+        
         if cache_key in question_cache:
             logger.info("Используется кэшированный ответ")
             return question_cache[cache_key]
@@ -259,7 +264,12 @@ def handle_photo_result(future, message):
     """Обработка результата анализа изображения"""
     try:
         chat_id = message.chat.id
-        file_data, original_file_size, compressed_size = future.result()
+        result = future.result()
+        if not result:
+            bot.send_message(chat_id, "⚠️ Ошибка обработки изображения", reply_markup=create_menu())
+            return
+            
+        file_data, original_file_size, compressed_size = result
         
         logger.info(f"Обработка фото: оригинал {original_file_size/1024:.1f}KB → сжато {compressed_size/1024:.1f}KB")
         bot.send_message(chat_id, "🤖 Анализирую изображение...")
