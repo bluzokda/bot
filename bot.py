@@ -2,6 +2,7 @@ import os
 import telebot
 import requests
 import logging
+import pytesseract
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import io
 from flask import Flask, request
@@ -62,40 +63,72 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_deepseek(query):
-    """Поиск через DeepSeek API"""
+def search_brave(query):
+    """Поиск через Brave Search API (основной метод)"""
     try:
-        logger.info(f"Поиск в DeepSeek: {query}")
+        logger.info(f"Поиск в Brave: {query}")
         encoded_query = quote_plus(query)
-        url = f"https://deepseek.com/search?q={encoded_query}&lang=ru"
+        url = f"https://api.search.brave.com/res/v1/web/search?q={encoded_query}&count=3&search_lang=ru"
         
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        # Используем публичный токен
+        brave_headers = HEADERS.copy()
+        brave_headers["X-Subscription-Token"] = "BSAkvgKRhAoFTHCWyQqMqNwN8gkf4QDN"
+        
+        response = requests.get(url, headers=brave_headers, timeout=15)
         if response.status_code == 200:
-            # Парсим HTML ответа
-            from bs4 import BeautifulSoup
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
+            data = response.json()
             results = []
+            web_results = data.get("web", {}).get("results", [])
             
-            # Ищем результаты
-            for result in soup.find_all('div', class_='result'):
-                title = result.find('h3').get_text(strip=True)
-                snippet = result.find('p').get_text(strip=True)
-                link = result.find('a')['href']
-                
+            for item in web_results[:3]:
                 results.append({
-                    "title": title,
-                    "url": link,
-                    "snippet": snippet
+                    "title": item.get("title", "Без названия")[:150],
+                    "url": item.get("url", "#"),
+                    "snippet": item.get("description", "Описание отсутствует")[:300]
                 })
             
             if results:
-                logger.info(f"Найдено в DeepSeek: {len(results)} результатов")
-                return results[:5]  # Возвращаем топ-5 результатов
+                logger.info(f"Найдено в Brave: {len(results)} результатов")
+                return results
         else:
-            logger.warning(f"DeepSeek вернул статус {response.status_code}")
+            logger.warning(f"Brave API вернул статус {response.status_code}")
     except Exception as e:
-        logger.error(f"Ошибка поиска в DeepSeek: {str(e)}")
+        logger.error(f"Ошибка поиска в Brave: {str(e)}")
+    return None
+
+def search_searx(query):
+    """Запасной поиск через Searx (если Brave не работает)"""
+    try:
+        logger.info(f"Поиск в Searx (резерв): {query}")
+        encoded_query = quote_plus(query)
+        # Используем публичный экземпляр Searx
+        url = f"https://searx.be/search?q={encoded_query}&categories=general&language=ru&format=json"
+        
+        searx_headers = HEADERS.copy()
+        searx_headers["Accept"] = "application/json"
+        
+        response = requests.get(url, headers=searx_headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            search_results = data.get("results", [])
+            
+            for item in search_results[:3]:
+                # Проверяем, что результат содержит нужные поля
+                if "title" in item and "content" in item:
+                    results.append({
+                        "title": item.get("title", "Без названия")[:150],
+                        "url": item.get("url", "#"),
+                        "snippet": item.get("content", "Описание отсутствует")[:300]
+                    })
+            
+            if results:
+                logger.info(f"Найдено в Searx: {len(results)} результатов")
+                return results
+        else:
+            logger.warning(f"Searx вернул статус {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка поиска в Searx: {str(e)}")
     return None
 
 def search_internet(query):
@@ -103,28 +136,38 @@ def search_internet(query):
     try:
         logger.info(f"Поисковый запрос: {query}")
         
-        # Пробуем разные источники по очереди
-        sources = [
-            ("DeepSeek", search_deepseek),
-        ]
-        
-        for source_name, search_func in sources:
-            try:
-                logger.info(f"Пробуем источник: {source_name}")
-                results = search_func(query)
-                if results and len(results) > 0:
-                    logger.info(f"Успешно получены результаты от {source_name}")
-                    return results
-            except Exception as e:
-                logger.error(f"Ошибка поиска в {source_name}: {str(e)}")
-                continue
-        
+        # Пробуем Brave Search (основной)
+        logger.info("Пробуем Brave Search...")
+        results = search_brave(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от Brave Search")
+            return results
+            
+        # Если Brave не сработал, пробуем Searx (резерв)
+        logger.info("Brave Search не дал результатов, пробуем Searx...")
+        results = search_searx(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от Searx")
+            return results
+            
         logger.warning("Не удалось получить результаты ни от одного источника")
-        return None
+        return [
+            {
+                "title": "Поиск не удался",
+                "url": "#",
+                "snippet": "К сожалению, не удалось найти информацию по вашему запросу. Попробуйте переформулировать вопрос или использовать другие ключевые слова."
+            }
+        ]
         
     except Exception as e:
         logger.error(f"Ошибка общего поиска: {str(e)}")
-        return None
+        return [
+            {
+                "title": "Ошибка поиска",
+                "url": "#",
+                "snippet": "Произошла ошибка при поиске информации. Попробуйте повторить запрос позже."
+            }
+        ]
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -241,13 +284,6 @@ def process_text_question(message):
         
         # Ищем ответ
         search_results = search_internet(question)
-        if not search_results:
-            bot.send_message(
-                chat_id, 
-                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
-                reply_markup=create_menu()
-            )
-            return
         
         response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
         for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
@@ -255,7 +291,7 @@ def process_text_question(message):
             title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
             response_text += f"<b>{i}. {title}</b>\n"
             response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#":
+            if res['url'] != "#" and res['url']:
                 response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
             else:
                 response_text += "\n"
@@ -310,13 +346,132 @@ def handle_photo(message):
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
         search_results = search_internet(text)
-        if not search_results:
-            # Попробуем найти по ключевым словам
-            keywords = ' '.join(text.split()[:10])
-            search_results = search_internet(keywords)
-            if not search_results:
-                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
-                return
+        
         response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
         for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
-            # Укорачиваем слиш
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            response_text += f"<b>{i}. {title}</b>\n"
+            response_text += f"<i>{res['snippet']}</i>\n"
+            if res['url'] != "#" and res['url']:
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
+            else:
+                response_text += "\n"
+        
+        # Сохраняем в историю
+        save_history(chat_id, f"Фото: {text[:50]}...", response_text)
+        
+        bot.send_message(
+            chat_id=chat_id,
+            text=response_text,
+            parse_mode='HTML',
+            disable_web_page_preview=True,  # Отключаем для стабильности
+            reply_markup=create_menu()
+        )
+        logger.info("Ответ по фото отправлен")
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
+
+@bot.message_handler(func=lambda message: message.text == '📚 История')
+def handle_history(message):
+    try:
+        chat_id = message.chat.id
+        logger.info(f"Обработка 'История' от {chat_id}")
+        if chat_id not in user_history or not user_history[chat_id]:
+            bot.send_message(chat_id, "📭 История запросов пуста.", reply_markup=create_menu())
+            return
+        history = user_history[chat_id]
+        response = "📚 Ваша история запросов:\n\n"
+        for i, item in enumerate(reversed(history), 1):
+            # Обрезаем длинные вопросы
+            question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
+            response += f"<b>{i}. Вопрос:</b> {question}\n"
+            # Показываем первый результат из ответа
+            first_result = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
+            response += f"<b>Ответ:</b> {first_result}\n"
+            response += "─" * 20 + "\n"
+        bot.send_message(
+            chat_id,
+            response,
+            parse_mode='HTML',
+            reply_markup=create_menu()
+        )
+        logger.info("История отправлена")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_history: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
+
+@app.route('/')
+def home():
+    return "🤖 Telegram Study Bot активен! Используйте /start в Telegram"
+
+@app.route('/health')
+def health_check():
+    """Endpoint для проверки работоспособности"""
+    return "OK", 200
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_data = request.get_json()
+            logger.info("Получен webhook-запрос")
+            update = telebot.types.Update.de_json(json_data)
+            bot.process_new_updates([update])
+            return '', 200
+        return 'Bad request', 400
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {str(e)}")
+        return 'Server error', 500
+
+def configure_webhook():
+    """Настраивает вебхук при запуске приложения"""
+    try:
+        # Для Render.com
+        if os.environ.get('RENDER'):
+            external_url = os.environ.get('RENDER_EXTERNAL_URL')
+            if external_url:
+                webhook_url = f"{external_url}/webhook"
+                # Проверка доступности бота
+                try:
+                    bot.get_me()
+                    logger.info("Бот доступен, устанавливаем вебхук")
+                except Exception as e:
+                    logger.error(f"Ошибка доступа к боту: {str(e)}")
+                    return
+                # Удаляем существующий вебхук перед установкой нового
+                bot.remove_webhook()
+                logger.info("Старый вебхук удален")
+                # Устанавливаем новый вебхук в фоновом потоке
+                def set_webhook_background():
+                    import time
+                    time.sleep(3)
+                    try:
+                        bot.set_webhook(url=webhook_url)
+                        logger.info(f"Вебхук установлен: {webhook_url}")
+                        # Проверяем информацию о вебхуке
+                        webhook_info = bot.get_webhook_info()
+                        logger.info(f"Информация о вебхуке: {webhook_info}")
+                    except Exception as e:
+                        logger.error(f"Ошибка установки вебхука: {str(e)}")
+                thread = threading.Thread(target=set_webhook_background)
+                thread.daemon = True
+                thread.start()
+                return
+            else:
+                logger.warning("RENDER_EXTERNAL_URL не найден!")
+        # Для других платформ/локального запуска
+        bot.remove_webhook()
+        logger.info("Вебхук удален, используется polling")
+    except Exception as e:
+        logger.error(f"Ошибка настройки вебхука: {str(e)}")
+
+# Установка вебхука после определения всех обработчиков
+configure_webhook()
+
+# Для Docker - запускаем Flask приложение
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"Запуск Flask приложения на порту {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
