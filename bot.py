@@ -64,105 +64,97 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_deepseek(query):
-    """Поиск через DeepSeek (основной метод)"""
+def search_duckduckgo_html(query):
+    """Поиск через DuckDuckGo HTML (обход API) - основной метод"""
     try:
-        logger.info(f"Поиск в DeepSeek: {query}")
+        logger.info(f"Поиск в DuckDuckGo HTML: {query}")
         encoded_query = quote_plus(query)
-        url = f"https://www.deepseek.com/search?q={encoded_query}&language=ru"
+        url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=ru-ru"
         
         response = requests.get(url, headers=HEADERS, timeout=15)
+        logger.info(f"DuckDuckGo HTML status: {response.status_code}")
+        
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             results = []
             
-            # Ищем результаты поиска (адаптируем селекторы под DeepSeek)
-            # Пробуем разные возможные селекторы
-            search_results = soup.find_all('div', {'data-selenium-generic': 'searchResultItem'})[:5]
+            # Ищем результаты
+            result_divs = soup.find_all('div', class_='result')[:5]
+            logger.info(f"DuckDuckGo HTML found {len(result_divs)} result divs")
             
-            if not search_results:
-                # Альтернативные селекторы
-                search_results = soup.find_all('div', class_='search-result')[:5]
-            
-            if not search_results:
-                # Еще один вариант
-                search_results = soup.find_all('div', class_='result')[:5]
-            
-            for result in search_results:
+            for div in result_divs:
                 try:
-                    # Ищем заголовок
-                    title_elem = result.find('h3') or result.find('h2') or result.find('h1')
-                    if not title_elem:
-                        continue
+                    title_elem = div.find('a', class_='result__a')
+                    if title_elem:
+                        title = title_elem.get_text(strip=True)
+                        url = title_elem.get('href', '#')
+                        snippet_elem = div.find('a', class_='result__snippet')
+                        snippet = snippet_elem.get_text(strip=True) if snippet_elem else "Описание отсутствует"
                         
-                    title = title_elem.get_text(strip=True)
+                        # Фильтруем пустые результаты
+                        if title and snippet and len(title.strip()) > 3 and len(snippet.strip()) > 5:
+                            results.append({
+                                "title": title[:150],
+                                "url": url,
+                                "snippet": snippet[:300]
+                            })
+                except Exception as e:
+                    logger.error(f"Ошибка парсинга результата DuckDuckGo: {str(e)}")
+                    continue
+            
+            if results:
+                logger.info(f"Найдено в DuckDuckGo HTML: {len(results)} результатов")
+                return results
+            else:
+                logger.warning("DuckDuckGo HTML не нашел подходящих результатов")
+        else:
+            logger.warning(f"DuckDuckGo HTML вернул статус {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
+    return None
+
+def search_searx_api(query):
+    """Поиск через Searx API (бесплатный, без ключа) - запасной метод"""
+    try:
+        logger.info(f"Поиск в Searx API (резерв): {query}")
+        encoded_query = quote_plus(query)
+        # Используем публичный экземпляр Searx
+        url = f"https://searx.work/search?q={encoded_query}&language=ru&format=json&categories=general"
+        
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        logger.info(f"Searx API status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            search_results = data.get("results", [])
+            
+            logger.info(f"Searx API found {len(search_results)} results")
+            
+            for item in search_results[:5]:  # Только топ-5
+                # Проверяем обязательные поля
+                if "title" in item and "content" in item:
+                    title = item.get("title", "Без названия")
+                    snippet = item.get("content", "Описание отсутствует")
+                    url = item.get("url", "#")
                     
-                    # Ищем описание
-                    desc_elem = result.find('p') or result.find('div', class_='description') or result.find('div', class_='snippet')
-                    snippet = desc_elem.get_text(strip=True) if desc_elem else "Описание отсутствует"
-                    
-                    # Ищем ссылку
-                    link_elem = result.find('a', href=True)
-                    url = link_elem['href'] if link_elem else "#"
-                    
-                    if title and snippet:
+                    # Фильтруем пустые результаты
+                    if title and snippet and len(title.strip()) > 6 and len(snippet.strip()) > 10:
                         results.append({
                             "title": title[:150],
                             "url": url,
                             "snippet": snippet[:300]
                         })
-                except Exception as e:
-                    continue
             
             if results:
-                logger.info(f"Найдено в DeepSeek: {len(results)} результатов")
+                logger.info(f"Найдено в Searx API: {len(results)} результатов")
                 return results
-                
+            else:
+                logger.warning("Searx API вернул пустые результаты")
         else:
-            logger.warning(f"DeepSeek вернул статус {response.status_code}")
+            logger.warning(f"Searx API вернул статус {response.status_code}")
     except Exception as e:
-        logger.error(f"Ошибка поиска в DeepSeek: {str(e)}")
-    return None
-
-def search_duckduckgo_html(query):
-    """Поиск через DuckDuckGo HTML (резервный метод)"""
-    try:
-        logger.info(f"Поиск в DuckDuckGo HTML (резерв): {query}")
-        encoded_query = quote_plus(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=ru-ru"
-        
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        
-        # Ищем результаты
-        result_divs = soup.find_all('div', class_='result')[:5]
-        for div in result_divs:
-            try:
-                title_elem = div.find('a', class_='result__a')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)[:150]
-                    url = title_elem.get('href', '#')
-                    snippet_elem = div.find('a', class_='result__snippet')
-                    snippet = snippet_elem.get_text(strip=True)[:300] if snippet_elem else "Описание отсутствует"
-                    
-                    if title and snippet:
-                        results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": snippet
-                        })
-            except:
-                continue
-        
-        if results:
-            logger.info(f"Найдено в DuckDuckGo HTML: {len(results)} результатов")
-            return results
-            
-    except Exception as e:
-        logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
+        logger.error(f"Ошибка поиска в Searx API: {str(e)}")
     return None
 
 def search_internet(query):
@@ -170,18 +162,18 @@ def search_internet(query):
     try:
         logger.info(f"Поисковый запрос: {query}")
         
-        # Пробуем DeepSeek (основной)
-        logger.info("Пробуем DeepSeek...")
-        results = search_deepseek(query)
-        if results and len(results) > 0:
-            logger.info("Успешно получены результаты от DeepSeek")
-            return results
-            
-        # Если DeepSeek не сработал, пробуем DuckDuckGo HTML (резерв)
-        logger.info("DeepSeek не дал результатов, пробуем DuckDuckGo HTML...")
+        # Пробуем DuckDuckGo HTML (основной)
+        logger.info("Пробуем DuckDuckGo HTML...")
         results = search_duckduckgo_html(query)
         if results and len(results) > 0:
             logger.info("Успешно получены результаты от DuckDuckGo HTML")
+            return results
+            
+        # Если DuckDuckGo не сработал, пробуем Searx API (резерв)
+        logger.info("DuckDuckGo HTML не дал результатов, пробуем Searx API...")
+        results = search_searx_api(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от Searx API")
             return results
             
         logger.warning("Не удалось получить результаты ни от одного источника")
