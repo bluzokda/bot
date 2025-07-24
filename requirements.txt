@@ -1,4 +1,4 @@
 python-telegram-bot==20.6
 requests==2.32.3
-Pillow==10.4.0
 pytesseract==0.3.10
+Pillow==10.4.0
