@@ -3,16 +3,17 @@ import telebot
 import requests
 import logging
 import pytesseract
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance
 import io
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import re
 import time
-import math
+import base64
+import hashlib
+from collections import deque
 import json
-from concurrent.futures import ThreadPoolExecutor
 
 # Настройка логирования
 logging.basicConfig(
@@ -34,6 +35,10 @@ if not BOT_TOKEN:
 if not DEEPSEEK_API_KEY:
     logger.warning("DEEPSEEK_API_KEY не установлен! Будет использоваться только поиск")
 
+# Настройка Tesseract (если требуется)
+if os.environ.get('PYTESSERACT_TESSERACT_CMD'):
+    pytesseract.pytesseract.tesseract_cmd = os.environ['PYTESSERACT_TESSERACT_CMD']
+
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
 
@@ -43,11 +48,12 @@ try:
     logger.info(f"Tesseract version: {tesseract_version}")
 except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
-    raise
 
-# Хранение истории
+# Хранение истории и кэша
 user_history = {}
+question_cache = {}
 image_executor = ThreadPoolExecutor(max_workers=2)
+MAX_HISTORY_ITEMS = 10
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
@@ -57,87 +63,106 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def ask_deepseek(prompt, is_image=False):
-    """Запрашивает ответ у DeepSeek API"""
+def compress_image(image_data, max_size=1.5*1024*1024):
+    """Сжимает изображение до приемлемого размера для API"""
+    if len(image_data) <= max_size:
+        return image_data
+        
+    try:
+        img = Image.open(io.BytesIO(image_data))
+        quality = 85
+        while len(image_data) > max_size and quality > 20:
+            buffer = io.BytesIO()
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                img = img.convert('RGB')
+            img.save(buffer, format="JPEG", quality=quality)
+            image_data = buffer.getvalue()
+            quality -= 15
+        return image_data
+    except Exception as e:
+        logger.error(f"Ошибка сжатия изображения: {str(e)}")
+        return image_data
+
+def ask_deepseek(prompt, image_data=None):
+    """Запрашивает ответ у DeepSeek API с поддержкой изображений"""
     if not DEEPSEEK_API_KEY:
         return None
         
     try:
+        # Кэширование запросов
+        cache_key = hashlib.md5((prompt + (image_data.decode() if image_data else "")[:100]).hexdigest()
+        if cache_key in question_cache:
+            logger.info("Используется кэшированный ответ")
+            return question_cache[cache_key]
+        
         headers = {
             "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        payload = {
-            "model": "deepseek-chat",
-            "messages": [
+        messages = [
+            {
+                "role": "system",
+                "content": "Ты полезный учебный помощник. Отвечай точно и информативно. Форматируй ответы с использованием HTML."
+            }
+        ]
+        
+        # Формируем запрос с изображением
+        if image_data:
+            # Сжимаем изображение перед отправкой
+            compressed_image = compress_image(image_data)
+            base64_image = base64.b64encode(compressed_image).decode('utf-8')
+            
+            user_content = [
+                {"type": "text", "text": prompt},
                 {
-                    "role": "system",
-                    "content": "Ты полезный учебный помощник. Отвечай точно и информативно. Форматируй ответы с использованием HTML."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}"
+                    }
                 }
-            ],
+            ]
+            messages.append({"role": "user", "content": user_content})
+            model = "deepseek-vision"
+        else:
+            messages.append({"role": "user", "content": prompt})
+            model = "deepseek-chat"
+        
+        payload = {
+            "model": model,
+            "messages": messages,
             "temperature": 0.7,
             "max_tokens": 2000
         }
-        
-        # Для изображений используем другую модель
-        if is_image:
-            payload["model"] = "deepseek-vision"
         
         response = requests.post(
             "https://api.deepseek.com/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=120
         )
         
+        # Проверка статус кода
+        if response.status_code == 402:
+            logger.error("Ошибка 402: Требуется оплата или лимит исчерпан")
+            return None
+            
         response.raise_for_status()
         data = response.json()
         
         if "choices" in data and len(data["choices"]) > 0:
-            return data["choices"][0]["message"]["content"]
+            result = data["choices"][0]["message"]["content"]
+            # Сохраняем в кэш
+            question_cache[cache_key] = result
+            return result
             
+    except requests.exceptions.RequestException as e:
+        error_detail = e.response.text if hasattr(e, 'response') and e.response else str(e)
+        logger.error(f"DeepSeek API error: {e} | Response: {error_detail}")
     except Exception as e:
-        logger.error(f"DeepSeek API error: {str(e)}")
+        logger.error(f"General error in ask_deepseek: {str(e)}")
     
     return None
-
-def process_image(image_data):
-    """Оптимизированное распознавание текста на изображении"""
-    try:
-        image = Image.open(io.BytesIO(image_data))
-        image = image.copy()
-        
-        # Конвертация в градации серого
-        if image.mode != 'L':
-            image = image.convert('L')
-        
-        # Умеренное улучшение контраста
-        enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(1.8)
-        
-        # Масштабирование только для мелких изображений
-        if min(image.size) < 500:
-            scale_factor = max(1000 / min(image.size), 1.8)
-            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
-            image = image.resize(new_size, Image.LANCZOS)
-        
-        # Распознаем текст с оптимизированными параметрами
-        custom_config = r'--oem 1 --psm 6 -l rus+eng'
-        text = pytesseract.image_to_string(image, config=custom_config)
-        
-        # Очистка текста
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        logger.info(f"Распознано символов: {len(text)}")
-        return text if len(text) > 5 else None
-    except Exception as e:
-        logger.error(f"Ошибка OCR: {str(e)}")
-        return None
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
@@ -204,8 +229,9 @@ def process_text_question(message):
             
             # Сохраняем в историю
             if chat_id not in user_history:
-                user_history[chat_id] = []
+                user_history[chat_id] = deque(maxlen=MAX_HISTORY_ITEMS)
             user_history[chat_id].append({
+                "type": "text",
                 "question": question,
                 "response": formatted_response
             })
@@ -221,7 +247,7 @@ def process_text_question(message):
         else:
             bot.send_message(
                 chat_id,
-                "⚠️ Не удалось получить ответ. Попробуйте еще раз.",
+                "⚠️ Не удалось получить ответ. Проверьте баланс API ключа или попробуйте позже.",
                 reply_markup=create_menu()
             )
             
@@ -229,51 +255,34 @@ def process_text_question(message):
         logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
 
-def process_image_async(file_data):
-    """Асинхронная обработка изображения"""
-    try:
-        start_time = time.time()
-        text = process_image(file_data)
-        elapsed_time = time.time() - start_time
-        logger.info(f"OCR занял {elapsed_time:.2f} секунд")
-        return text
-    except Exception as e:
-        logger.error(f"Ошибка в process_image_async: {str(e)}")
-        return None
-
 def handle_photo_result(future, message):
-    """Обработка результата распознавания"""
+    """Обработка результата анализа изображения"""
     try:
         chat_id = message.chat.id
-        text = future.result()
+        file_data, original_file_size, compressed_size = future.result()
         
-        if not text:
-            bot.send_message(
-                chat_id, 
-                "❌ Не удалось распознать текст на фото. Попробуйте другое изображение.",
-                reply_markup=create_menu()
-            )
-            return
+        logger.info(f"Обработка фото: оригинал {original_file_size/1024:.1f}KB → сжато {compressed_size/1024:.1f}KB")
+        bot.send_message(chat_id, "🤖 Анализирую изображение...")
         
-        # Отправляем запрос в DeepSeek с распознанным текстом
-        bot.send_message(chat_id, "🤖 Анализирую содержание...")
-        prompt = f"Пользователь отправил фотографию с текстом. Проанализируй содержание и дай развернутый ответ:\n\n{text}"
-        ai_response = ask_deepseek(prompt, is_image=True)
+        # Запрос к DeepSeek Vision
+        prompt = "Пользователь отправил фотографию с учебным заданием. Проанализируй изображение и дай развернутый ответ."
+        ai_response = ask_deepseek(prompt, image_data=file_data)
         
         if ai_response:
             # Форматируем ответ
             formatted_response = (
                 f"<b>📸 Анализ изображения:</b>\n\n"
-                f"<b>Распознанный текст:</b>\n<code>{text[:500]}{'...' if len(text) > 500 else ''}</code>\n\n"
-                f"<b>🤖 Ответ от DeepSeek:</b>\n{ai_response}"
+                f"<b>🤖 Ответ от DeepSeek Vision:</b>\n{ai_response}"
             )
             
             # Сохраняем в историю
             if chat_id not in user_history:
-                user_history[chat_id] = []
+                user_history[chat_id] = deque(maxlen=MAX_HISTORY_ITEMS)
             user_history[chat_id].append({
-                "question": f"Фото: {text[:50]}...",
-                "response": formatted_response
+                "type": "image",
+                "question": "Фото с заданием",
+                "response": formatted_response,
+                "file_size": f"{compressed_size/1024:.1f}KB"
             })
             
             # Отправляем ответ
@@ -304,11 +313,15 @@ def handle_photo(message):
         file_id = message.photo[-1].file_id
         file_info = bot.get_file(file_id)
         file_data = bot.download_file(file_info.file_path)
+        original_size = len(file_data)
         
         bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
         
-        # Отправляем в отдельный поток
-        future = image_executor.submit(process_image_async, file_data)
+        # Отправляем в отдельный поток для сжатия
+        future = image_executor.submit(
+            lambda data: (compress_image(data), original_size, len(compress_image(data))),
+            file_data
+        )
         future.add_done_callback(lambda f: handle_photo_result(f, message))
         
     except Exception as e:
@@ -331,22 +344,16 @@ def handle_history(message):
         for i, item in enumerate(reversed(history), 1):
             # Обрезаем длинные вопросы
             question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
+            item_type = "📷" if item['type'] == "image" else "📝"
             
-            response += f"<b>{i}. Вопрос:</b> {question}\n"
-            response += "─" * 20 + "\n\n"
+            response += f"{item_type} <b>{i}. {question}</b>\n"
+            if item['type'] == "image":
+                response += f"   └ Размер: {item.get('file_size', 'N/A')}\n"
+            response += "─" * 20 + "\n"
         
         bot.send_message(
             chat_id,
             response,
-            parse_mode='HTML',
-            reply_markup=create_menu()
-        )
-        
-        # Отправляем последний ответ отдельно для удобства
-        last_item = history[-1]
-        bot.send_message(
-            chat_id,
-            f"<b>Последний ответ:</b>\n\n{last_item['response']}",
             parse_mode='HTML',
             reply_markup=create_menu()
         )
@@ -405,7 +412,7 @@ def configure_webhook():
                         bot.set_webhook(url=webhook_url)
                         logger.info(f"Вебхук установлен: {webhook_url}")
                         webhook_info = bot.get_webhook_info()
-                        logger.info(f"Информация о вебхуке: {webhook_info}")
+                        logger.info(f"Информация о вебхуке: {json.dumps(webhook_info.__dict__, indent=2)}")
                     except Exception as e:
                         logger.error(f"Ошибка установки вебхука: {str(e)}")
                 
