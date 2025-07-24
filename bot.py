@@ -11,7 +11,8 @@ import threading
 import re
 import time
 import json
-from urllib.parse import quote_plus
+from transformers import pipeline
+import torch
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,7 +24,7 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
+HF_TOKEN = os.environ.get('HF_TOKEN')
 
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
@@ -40,26 +41,30 @@ except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
 
-# Улучшенные заголовки для обхода блокировок
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "max-age=0"
-}
+# Инициализация модели Hugging Face (если токен есть)
+qa_pipeline = None
+if HF_TOKEN:
+    try:
+        logger.info("Загрузка модели Hugging Face...")
+        # Используем модель для вопрос-ответ, она хороша для извлечения ответов из текста
+        qa_pipeline = pipeline(
+            "question-answering",
+            model="deepset/roberta-base-squad2",
+            tokenizer="deepset/roberta-base-squad2",
+            device=0 if torch.cuda.is_available() else -1  # Используем GPU если доступен
+        )
+        logger.info("Модель Hugging Face загружена успешно")
+    except Exception as e:
+        logger.error(f"Ошибка загрузки модели Hugging Face: {e}")
+        # Если модель не загрузилась, работаем без ИИ
+else:
+    logger.warning("HF_TOKEN не найден, ИИ-функции отключены")
 
-# OpenRouter API настройки
-OPENROUTER_HEADERS = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "HTTP-Referer": os.environ.get('RENDER_EXTERNAL_URL', 'https://your-bot.onrender.com'),
-    "X-Title": "StudyBot",
-    "Content-Type": "application/json"
+# Настройки поиска
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 # Хранение истории
@@ -73,185 +78,72 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_wikipedia(query):
-    """Поиск через Wikipedia API (резервный метод)"""
-    try:
-        logger.info(f"Поиск в Wikipedia (резерв): {query}")
-        # Сначала ищем статьи
-        search_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{quote_plus(query)}"
-        
-        response = requests.get(search_url, headers=HEADERS, timeout=15)
-        logger.info(f"Wikipedia status: {response.status_code}")
-
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            
-            title = data.get("title", "Без названия")
-            snippet = data.get("extract", "Описание отсутствует")
-            url = data.get("content_urls", {}).get("desktop", {}).get("page", "#")
-            
-            if title and snippet:
-                results.append({
-                    "title": title[:150],
-                    "url": url,
-                    "snippet": snippet[:300]
-                })
-                logger.info(f"Найдено в Wikipedia: 1 результат")
-                return results
-        elif response.status_code == 404:
-            # Если точное совпадение не найдено, пробуем поиск
-            search_url = f"https://ru.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'format': 'json',
-                'list': 'search',
-                'srsearch': query,
-                'srlimit': 3
-            }
-            
-            search_response = requests.get(search_url, params=params, headers=HEADERS, timeout=15)
-            if search_response.status_code == 200:
-                search_data = search_response.json()
-                results = []
-                search_results = search_data.get("query", {}).get("search", [])
-                
-                for item in search_results:
-                    title = item.get("title", "Без названия")
-                    snippet = item.get("snippet", "Описание отсутствует")
-                    # Очищаем HTML теги из сниппета
-                    snippet = re.sub(r'<.*?>', '', snippet)
-                    url = f"https://ru.wikipedia.org/wiki/{quote_plus(title)}"
-                    
-                    if title and snippet:
-                        results.append({
-                            "title": title[:150],
-                            "url": url,
-                            "snippet": snippet[:300]
-                        })
-                
-                if results:
-                    logger.info(f"Найдено в Wikipedia поиске: {len(results)} результатов")
-                    return results
-        else:
-            logger.warning(f"Wikipedia вернул статус {response.status_code}")
-    except Exception as e:
-        logger.error(f"Ошибка поиска в Wikipedia: {str(e)}")
-    return None
-
-def get_ai_answer(question, context="", use_internet_context=True):
-    """Получает ответ от ИИ через OpenRouter"""
-    if not OPENROUTER_API_KEY:
-        logger.warning("OPENROUTER_API_KEY не установлен")
-        return None, "❌ Ключ OpenRouter не установлен. Не удалось получить ответ от ИИ."
-
-    try:
-        logger.info(f"Запрос к OpenRouter: {question}")
-        
-        # Формируем сообщения для чат-модели
-        system_message = (
-            "Ты помощник по учебе. Отвечай четко и по делу на русском языке. "
-        )
-        
-        if use_internet_context and context:
-            system_message += (
-                "Тебе предоставлен контекст из интернета. Используй его для ответа. "
-                "Если контекст не содержит нужной информации, скажи об этом и дай лучший ответ на основе своих знаний. "
-                "Если ты используешь контекст, укажи об этом. "
-                "Отвечай кратко и по существу."
-            )
-            user_message = f"Контекст:\n{context}\n\nВопрос: {question}"
-        else:
-            system_message += "Ответь на основе своих знаний."
-            user_message = question
-
-        messages = [
-            {
-                "role": "system",
-                "content": system_message
-            },
-            {
-                "role": "user",
-                "content": user_message
-            }
-        ]
-
-        payload = {
-            "model": "openai/gpt-3.5-turbo",  # Можно изменить на другую модель
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 800  # Увеличен лимит для более полных ответов
-        }
-
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=OPENROUTER_HEADERS,
-            json=payload,
-            timeout=45  # Увеличенный таймаут для ИИ
-        )
-
-        logger.info(f"OpenRouter status: {response.status_code}")
-
-        if response.status_code == 200:
-            data = response.json()
-            answer = data['choices'][0]['message']['content'].strip()
-            logger.info(f"Получен ответ от OpenRouter: {len(answer)} символов")
-            return answer, None
-        elif response.status_code == 429:
-            error_msg = "⏰ Превышен лимит запросов к ИИ. Попробуйте позже."
-            logger.warning("OpenRouter вернул 429 - Rate Limit")
-            return None, error_msg
-        elif response.status_code == 502:
-            error_msg = "🔌 Ошибка подключения к сервису ИИ. Попробуйте позже."
-            logger.warning("OpenRouter вернул 502 - Bad Gateway")
-            return None, error_msg
-        else:
-            error_msg = f"❌ Ошибка API ИИ: {response.status_code}"
-            logger.error(f"OpenRouter вернул статус {response.status_code}: {response.text}")
-            return None, error_msg
-
-    except requests.exceptions.Timeout:
-        error_msg = "⌛ Таймаут соединения с ИИ. Попробуйте позже."
-        logger.error("Таймаут при запросе к OpenRouter")
-        return None, error_msg
-    except requests.exceptions.ConnectionError:
-        error_msg = "🔌 Ошибка подключения к сервису ИИ."
-        logger.error("Ошибка соединения с OpenRouter")
-        return None, error_msg
-    except Exception as e:
-        error_msg = f"⚠️ Ошибка ИИ: {str(e)}"
-        logger.error(f"Ошибка запроса к OpenRouter: {str(e)}")
-        return None, error_msg
-
 def search_internet(query):
-    """Ищет информацию по запросу через несколько источников"""
+    """Ищет информацию по запросу через DuckDuckGo API"""
     try:
         logger.info(f"Поисковый запрос: {query}")
-        
-        # Пробуем Wikipedia (часто стабильный источник)
-        logger.info("Пробуем Wikipedia...")
-        results = search_wikipedia(query)
-        if results and len(results) > 0:
-            logger.info("Успешно получены результаты от Wikipedia")
-            return results
-            
-        logger.warning("Не удалось получить результаты ни от одного источника")
-        return [
-            {
-                "title": "Поиск не удался",
-                "url": "#",
-                "snippet": "К сожалению, не удалось найти информацию по вашему запросу."
-            }
-        ]
+        # Форматируем запрос для API
+        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
+        url = f"https://api.duckduckgo.com/?q={formatted_query}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        results = []
+        # Основной результат
+        if data.get("AbstractText"):
+            results.append({
+                "title": data.get("Heading", "Основной результат"),
+                "url": data.get("AbstractURL", "#"),
+                "snippet": data.get("AbstractText", "Описание отсутствует")
+            })
+        # Похожие темы
+        for topic in data.get("RelatedTopics", [])[:5]:
+            if "FirstURL" in topic and "Text" in topic:
+                results.append({
+                    "title": topic["Text"].split(" — ")[0],
+                    "url": topic["FirstURL"],
+                    "snippet": topic["Text"]
+                })
+        # Результаты из внешних источников
+        for result in data.get("Results", [])[:5]:
+            results.append({
+                "title": result.get("Text", "Без названия"),
+                "url": result.get("FirstURL", "#"),
+                "snippet": result.get("Text", "Описание отсутствует")
+            })
+        logger.info(f"Найдено результатов: {len(results)}")
+        return results if results else None
     except Exception as e:
-        logger.error(f"Ошибка общего поиска: {str(e)}")
-        return [
-            {
-                "title": "Ошибка поиска",
-                "url": "#",
-                "snippet": "Произошла ошибка при поиске информации."
+        logger.error(f"Ошибка поиска: {str(e)}")
+        return None
+
+def get_ai_answer(question, context):
+    """Использует Hugging Face для извлечения точного ответа"""
+    if not qa_pipeline:
+        return None
+        
+    try:
+        logger.info(f"ИИ обрабатывает вопрос: {question}")
+        # Ограничиваем контекст для лучшей производительности
+        context = context[:2000] 
+        result = qa_pipeline(question=question, context=context)
+        
+        # Проверяем уверенность модели
+        if result['score'] > 0.1:  # Минимальный порог уверенности
+            answer = result['answer']
+            confidence = result['score']
+            logger.info(f"ИИ ответ: {answer} (уверенность: {confidence:.2f})")
+            return {
+                "answer": answer,
+                "confidence": confidence,
+                "context_used": context[:200] + "..." if len(context) > 200 else context
             }
-        ]
+        else:
+            logger.info("ИИ не уверен в ответе")
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка ИИ: {e}")
+        return None
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -282,7 +174,7 @@ def process_image(image_data):
         image = enhancer.enhance(3.0)
         # Легкое размытие для уменьшения шума
         image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        # Бинаризация
+        # Бинаризация (адаптивное пороговое преобразование)
         image = ImageOps.autocontrast(image)
         image = image.point(lambda p: 255 if p > 160 else 0)
         # Масштабирование для мелкого текста
@@ -311,7 +203,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
+            "• Искать ответы на текстовые вопросы (с ИИ!)\n"  # Уточняем про ИИ
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -358,71 +250,68 @@ def process_text_question(message):
         chat_id = message.chat.id
         question = message.text
         logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
-
+        
         if len(question) < 3:
             bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
             return
-
+        
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
         
-        # 1. Сначала пытаемся получить ответ от ИИ без контекста
-        ai_answer, error_msg = get_ai_answer(question, use_internet_context=False)
-        
-        if ai_answer:
-            # Отлично, ИИ дал ответ! Отправляем его.
-            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}"
-            logger.info("Ответ от ИИ (без контекста) получен успешно")
-        else:
-            # Если ИИ не дал ответ или была ошибка, сообщаем об этом и пытаемся найти информацию
-            logger.info(f"ИИ не дал ответ: {error_msg or 'Нет ответа'}. Пробуем поиск в интернете.")
-            
-            # 2. Ищем информацию в интернете как резерв
-            search_results = search_internet(question)
-            
-            if search_results and search_results[0]['title'] != "Поиск не удался":
-                # Получаем контекст из результатов поиска
-                context = "\n\n".join([f"{res['title']}: {res['snippet']}" for res in search_results[:2]])
-                
-                # 3. Пытаемся получить ответ от ИИ с контекстом
-                ai_answer_with_context, _ = get_ai_answer(question, context, use_internet_context=True)
-                
-                if ai_answer_with_context:
-                    # ИИ дал ответ с контекстом
-                    response_text = f"🤖 <b>Ответ от ИИ (на основе найденной информации):</b>\n{ai_answer_with_context}\n\n"
-                    # Добавляем источник
-                    best_result = search_results[0]
-                    response_text += f"<b>Источник:</b> {best_result['title']}\n"
-                    if best_result['url'] != "#" and best_result['url']:
-                        response_text += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-                else:
-                    # Если ИИ не смог обработать даже с контекстом, показываем результаты поиска
-                    response_text = "🔍 <b>Найденная информация:</b>\n"
-                    best_result = search_results[0]
-                    response_text += f"<i>{best_result['snippet']}</i>\n\n"
-                    response_text += f"<b>Источник:</b> {best_result['title']}\n"
-                    if best_result['url'] != "#" and best_result['url']:
-                        response_text += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-            else:
-                # Поиск не дал результатов, показываем ошибку ИИ или сообщение о неудаче
-                if error_msg:
-                    response_text = error_msg + "\n\n"
-                    response_text += "ℹ️ Также не удалось найти информацию в интернете."
-                else:
-                    response_text = "❌ Не удалось обработать ваш запрос и найти информацию."
+        # Ищем ответ
+        search_results = search_internet(question)
+        if not search_results:
+            bot.send_message(
+                chat_id, 
+                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                reply_markup=create_menu()
+            )
+            return
 
+        # Берем лучший результат как контекст для ИИ
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
+        url = best_result['url']
+        
+        # Пытаемся получить точный ответ через ИИ
+        ai_response = get_ai_answer(question, context)
+        
+        if ai_response:
+            # Возвращаем точный ответ от ИИ
+            response_text = f"🤖 <b>Точный ответ:</b>\n{ai_response['answer']}\n"
+            response_text += f"<i>Уверенность: {ai_response['confidence']:.2f}</i>\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+            else:
+                response_text += f"<i>Контекст: {ai_response['context_used']}</i>"
+        else:
+            # Если ИИ не дал точного ответа, возвращаем обычный результат
+            response_text = "🔍 <b>Найденная информация:</b>\n"
+            response_text += f"<i>{context}</i>\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+            else:
+                # Показываем другие найденные результаты как альтернативу
+                response_text += "\n<b>Другие результаты:</b>\n"
+                for i, res in enumerate(search_results[1:3], 1):
+                    alt_title = res['title'] if len(res['title']) < 50 else res['title'][:47] + "..."
+                    response_text += f"{i}. {alt_title}\n"
+        
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
-
+        
         bot.send_message(
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,
+            disable_web_page_preview=True,  # Отключаем для стабильности
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
-
+        
     except Exception as e:
         logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
@@ -445,7 +334,7 @@ def handle_photo(message):
         logger.info(f"OCR занял {elapsed_time:.2f} секунд")
         if not text or len(text) < 10:
             bot.send_message(
-                chat_id,
+                chat_id, 
                 "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
                 reply_markup=create_menu()
             )
@@ -459,61 +348,59 @@ def handle_photo(message):
             reply_markup=create_menu()
         )
         # Ищем ответ по распознанному тексту
-        bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст...")
+        bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
+        search_results = search_internet(text)
         
-        # 1. Сначала пытаемся получить ответ от ИИ по распознанному тексту
-        ai_answer, error_msg = get_ai_answer(text, use_internet_context=False)
+        if not search_results:
+            # Попробуем найти по ключевым словам
+            keywords = ' '.join(text.split()[:10])
+            search_results = search_internet(keywords)
+            if not search_results:
+                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
+                return
         
-        if ai_answer:
-            # Отлично, ИИ дал ответ по тексту!
-            response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}"
-            logger.info("Ответ от ИИ (по фото) получен успешно")
-        else:
-            # Если ИИ не дал ответ или была ошибка, сообщаем об этом
-            logger.info(f"ИИ не дал ответ по фото: {error_msg or 'Нет ответа'}.")
-            
-            # 2. Ищем информацию в интернете как резерв
-            search_results = search_internet(text)
-            
-            if search_results and search_results[0]['title'] != "Поиск не удался":
-                # Получаем контекст из результатов поиска
-                context = "\n\n".join([f"{res['title']}: {res['snippet']}" for res in search_results[:2]])
-                
-                # 3. Пытаемся получить ответ от ИИ с контекстом
-                ai_answer_with_context, _ = get_ai_answer("Объясни содержание следующего текста: " + text[:200] + "...", context, use_internet_context=True)
-                
-                if ai_answer_with_context:
-                    # ИИ дал ответ с контекстом
-                    response_text = f"🤖 <b>Ответ от ИИ (на основе найденной информации по тексту):</b>\n{ai_answer_with_context}\n\n"
-                    # Добавляем источник
-                    best_result = search_results[0]
-                    response_text += f"<b>Источник:</b> {best_result['title']}\n"
-                    if best_result['url'] != "#" and best_result['url']:
-                        response_text += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-                else:
-                    # Если ИИ не смог обработать даже с контекстом, показываем результаты поиска
-                    response_text = "🔍 <b>Найденная информация по тексту:</b>\n"
-                    best_result = search_results[0]
-                    response_text += f"<i>{best_result['snippet']}</i>\n\n"
-                    response_text += f"<b>Источник:</b> {best_result['title']}\n"
-                    if best_result['url'] != "#" and best_result['url']:
-                        response_text += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
+        # Берем лучший результат как контекст для ИИ
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
+        url = best_result['url']
+        
+        # Пытаемся получить точный ответ через ИИ
+        # Используем начало распознанного текста как вопрос
+        question_from_text = text[:100] + "..." if len(text) > 100 else text
+        ai_response = get_ai_answer(question_from_text, context)
+        
+        if ai_response:
+            # Возвращаем точный ответ от ИИ
+            response_text = f"🤖 <b>Точный ответ (по тексту):</b>\n{ai_response['answer']}\n"
+            response_text += f"<i>Уверенность: {ai_response['confidence']:.2f}</i>\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
             else:
-                # Поиск не дал результатов, показываем ошибку ИИ или сообщение о неудаче
-                if error_msg:
-                    response_text = error_msg + "\n\n"
-                    response_text += "ℹ️ Также не удалось найти информацию по распознанному тексту."
-                else:
-                    response_text = "❌ Не удалось обработать распознанный текст и найти информацию."
-
+                response_text += f"<i>Контекст: {ai_response['context_used']}</i>"
+        else:
+            # Если ИИ не дал точного ответа, возвращаем обычный результат
+            response_text = "🔍 <b>Найденная информация (по тексту):</b>\n"
+            response_text += f"<i>{context}</i>\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+            else:
+                # Показываем другие найденные результаты как альтернативу
+                response_text += "\n<b>Другие результаты:</b>\n"
+                for i, res in enumerate(search_results[1:3], 1):
+                    alt_title = res['title'] if len(res['title']) < 50 else res['title'][:47] + "..."
+                    response_text += f"{i}. {alt_title}\n"
+        
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
-
+        
         bot.send_message(
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,
+            disable_web_page_preview=True,  # Отключаем для стабильности
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
