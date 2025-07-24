@@ -21,12 +21,11 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
 
-# Хранение истории (ограничено для экономии памяти)
+# Хранение истории
 user_history = {}
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
-    from telebot.types import ReplyKeyboardMarkup, KeyboardButton
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton('📝 Задать вопрос'))
     markup.add(KeyboardButton('📚 История'))
@@ -38,7 +37,7 @@ def query_deepseek_api(prompt):
         url = "https://chat.deepseek.com/api/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": "Bearer sk-xxx"  # Замените на ваш токен, если потребуется
+            "Authorization": f"Bearer {os.environ.get('DEEPSEEK_API_KEY')}"
         }
         data = {
             "model": "deepseek-chat",
@@ -51,7 +50,7 @@ def query_deepseek_api(prompt):
         return result['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.error(f"Ошибка запроса к DeepSeek API: {e}")
-        return "Извините, не удалось получить ответ от ИИ."
+        return None
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -67,49 +66,17 @@ def save_history(user_id, question, response):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    try:
-        logger.info(f"Обработка команды /start от {message.chat.id}")
-        response = (
-            "👋 Привет! Я твой ИИ-помощник.\n"
-            "Я умею отвечать на любые вопросы с помощью искусственного интеллекта.\n\n"
-            "Нажми '📝 Задать вопрос' или просто отправь мне сообщение!"
-        )
-        bot.send_message(message.chat.id, response, reply_markup=create_menu())
-        logger.info("Приветственное сообщение отправлено")
-    except Exception as e:
-        logger.error(f"Ошибка в send_welcome: {e}")
+    response = (
+        "👋 Привет! Я твой ИИ-помощник.\n"
+        "Я умею отвечать на любые вопросы с помощью искусственного интеллекта.\n\n"
+        "Нажми '📝 Задать вопрос' или просто отправь мне сообщение!"
+    )
+    bot.send_message(message.chat.id, response, reply_markup=create_menu())
 
 @bot.message_handler(func=lambda message: message.text == '📝 Задать вопрос')
 def handle_ask_question(message):
-    try:
-        logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
-        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
-        bot.register_next_step_handler(msg, process_text_question)
-    except Exception as e:
-        logger.error(f"Ошибка в handle_ask_question: {e}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
-
-@bot.message_handler(func=lambda message: message.text == '📚 История')
-def handle_history(message):
-    try:
-        chat_id = message.chat.id
-        logger.info(f"Обработка 'История' от {chat_id}")
-        if chat_id not in user_history or not user_history[chat_id]:
-            bot.send_message(chat_id, "📭 История запросов пуста.", reply_markup=create_menu())
-            return
-        history = user_history[chat_id]
-        response = "📚 Ваша история запросов:\n\n"
-        for i, item in enumerate(reversed(history), 1):
-            question = item['question'][:50] + "..." if len(item['question']) > 50 else item['question']
-            response += f"{i}. <b>Вопрос:</b> {question}\n"
-            # Показываем начало ответа
-            answer_preview = item['response'][:100] + "..." if len(item['response']) > 100 else item['response']
-            response += f"   <b>Ответ:</b> {answer_preview}\n\n"
-        bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=create_menu())
-        logger.info("История отправлена")
-    except Exception as e:
-        logger.error(f"Ошибка в handle_history: {e}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
+    msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
+    bot.register_next_step_handler(msg, process_text_question)
 
 def process_text_question(message):
     try:
@@ -136,7 +103,7 @@ def process_text_question(message):
         )
         
         # Формируем и отправляем ответ
-        response_text = f"<b>Вопрос:</b> {question}\n\n<b>Ответ:</b> {answer}"
+        response_text = f"<b>Вопрос:</b> {question}\n\n<b>Ответ:</b> {answer or 'Извините, не удалось получить ответ от ИИ.'}"
         bot.send_message(
             chat_id=chat_id,
             text=response_text,
@@ -149,15 +116,8 @@ def process_text_question(message):
         logger.info("Ответ на текстовый вопрос отправлен")
 
     except Exception as e:
-        logger.error(f"Ошибка в process_text_question: {e}")
+        logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
-
-# Обрабатываем любые текстовые сообщения как вопросы
-@bot.message_handler(content_types=['text'])
-def handle_any_text(message):
-    # Если это не команда и не кнопка меню, обрабатываем как вопрос
-    if not message.text.startswith('/') and message.text not in ['📝 Задать вопрос', '📚 История']:
-        process_text_question(message)
 
 @app.route('/')
 def home():
@@ -222,7 +182,6 @@ def configure_webhook():
 # Установка вебхука
 configure_webhook()
 
-# Для Docker - запуск Flask приложения
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"Запуск Flask приложения на порту {port}")
