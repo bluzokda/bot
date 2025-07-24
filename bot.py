@@ -8,7 +8,7 @@ import pytesseract
 import io
 import re
 import requests
-import time  # Добавлено для обработки ожидания модели
+from concurrent.futures import ThreadPoolExecutor
 
 # Настройка логирования
 logging.basicConfig(
@@ -25,12 +25,34 @@ OCR_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
 
 # Кэш контекста пользователей
 user_context = {}
+executor = ThreadPoolExecutor(max_workers=4)
 
 async def image_to_text(image_bytes: bytes) -> str:
     """Конвертирует изображение в текст с помощью Tesseract OCR"""
     try:
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(
+            executor,
+            lambda: self._sync_image_to_text(image_bytes)
+        return text
+    except Exception as e:
+        logger.error(f"OCR error: {e}")
+        return "Ошибка обработки изображения."
+
+def _sync_image_to_text(self, image_bytes: bytes) -> str:
+    """Синхронная обработка изображения"""
+    try:
         image = Image.open(io.BytesIO(image_bytes))
-        image = image.convert('L')
+        
+        # Улучшение качества изображения
+        if image.width > 1000 or image.height > 1000:
+            new_width = 1000
+            new_height = int(new_width * image.height / image.width)
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+            
+        image = image.convert('L')  # Grayscale
+        image = image.point(lambda x: 0 if x < 140 else 255)  # Увеличение контраста
+        
         text = pytesseract.image_to_string(
             image,
             lang='rus+eng',
@@ -38,8 +60,8 @@ async def image_to_text(image_bytes: bytes) -> str:
         )
         return re.sub(r'\s+', ' ', text).strip() or "Не удалось распознать текст."
     except Exception as e:
-        logger.error(f"OCR error: {e}")
-        return "Ошибка обработки изображения."
+        logger.exception("OCR error")
+        return "Ошибка обработки изображения"
 
 async def get_answer(question: str, context: str) -> str:
     """Получение ответа через Hugging Face API"""
@@ -54,23 +76,25 @@ async def get_answer(question: str, context: str) -> str:
     }
     
     try:
-        response = requests.post(API_URL, headers=HEADERS, json=payload)
+        response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=20)
         
-        # Обработка разных статусов API
         if response.status_code == 200:
             result = response.json()
-            return result['answer'] if result['score'] > 0.01 else "Ответ не найден в тексте"
+            return result.get('answer', 'Ответ не найден')
+            
         elif response.status_code == 503:
-            # Модель загружается - пробуем подождать
-            retry_after = int(response.headers.get('Retry-After', 20))
-            logger.warning(f"Model loading, retry after {retry_after}s")
-            return f"Модель загружается, попробуйте через {retry_after} секунд"
+            retry_after = int(response.headers.get('Retry-After', 30))
+            return f"🚧 Модель загружается, попробуйте через {retry_after} секунд"
+            
         else:
-            logger.error(f"API error: {response.status_code} - {response.text}")
-            return f"Ошибка API: {response.status_code}"
+            logger.error(f"API error {response.status_code}: {response.text[:200]}")
+            return f"❌ Ошибка API: {response.status_code}"
+            
+    except requests.exceptions.Timeout:
+        return "⌛ Таймаут соединения с API"
     except Exception as e:
-        logger.error(f"Request error: {e}")
-        return "Ошибка соединения с API"
+        logger.exception("HF request exception")
+        return f"⚠️ Ошибка: {str(e)}"
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик входящих сообщений"""
@@ -80,15 +104,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Обработка изображений
     if msg.photo:
         try:
+            await msg.reply_chat_action(action="typing")
             photo_file = await msg.photo[-1].get_file()
             image_bytes = await photo_file.download_as_bytearray()
+            
             text = await image_to_text(image_bytes)
             
             user_context[user_id] = text
             response = f"✅ Текст распознан ({len(text)} символов)\nЗадайте вопрос по тексту"
             await msg.reply_text(response)
         except Exception as e:
-            logger.error(f"Photo error: {e}")
+            logger.exception("Photo processing error")
             await msg.reply_text("⚠️ Ошибка обработки изображения")
         return
     
@@ -100,7 +126,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Команда сброса
     if user_text.lower() in ['/start', '/clear', '/new']:
-        user_context.pop(user_id, None)
+        if user_id in user_context:
+            del user_context[user_id]
         await msg.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
         return
     
@@ -110,6 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Получение ответа
+    await msg.reply_chat_action(action="typing")
     context_text = user_context[user_id]
     status_msg = await msg.reply_text("🔍 Анализирую вопрос...")
     
@@ -122,7 +150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status_msg.edit_text(response)
     except Exception as e:
-        logger.error(f"Error processing question: {e}")
+        logger.exception("Error processing question")
         await status_msg.edit_text("⚠️ Произошла ошибка при обработке вашего вопроса")
 
 def main() -> None:
@@ -131,15 +159,18 @@ def main() -> None:
     if not token:
         raise ValueError("Токен Telegram не найден!")
     
+    # Путь к Tesseract (уже настроен в Dockerfile)
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
     
     application = Application.builder().token(token).build()
     application.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
     
-    # Обработчик команд
-    application.add_handler(MessageHandler(filters.Regex(r'^/(start|clear|new)$'), handle_message))
-    
+    logger.info("Бот запущен")
     application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.exception("Бот упал с ошибкой")
+        raise
