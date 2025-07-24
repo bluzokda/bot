@@ -3,6 +3,7 @@ import telebot
 import requests
 import logging
 from flask import Flask, request
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import time
 import json
@@ -26,9 +27,10 @@ user_history = {}
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(KeyboardButton('📝 Задать вопрос'))
-    markup.add(KeyboardButton('📚 История'))
+    markup.add(KeyboardButton('📷 Отправить фото'), KeyboardButton('📚 История'))
+    markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
 def query_deepseek_api(prompt):
@@ -64,18 +66,35 @@ def save_history(user_id, question, response):
         "response": response
     })
 
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     response = (
-        "👋 Привет! Я твой ИИ-помощник.\n"
-        "Я умею отвечать на любые вопросы с помощью искусственного интеллекта.\n\n"
-        "Нажми '📝 Задать вопрос' или просто отправь мне сообщение!"
+        "👋 Привет! Я твой бот-помощник для учебы!\n"
+        "Я умею:\n"
+        "• Искать ответы на текстовые вопросы\n"
+        "• Распознавать текст с фотографий\n"
+        "• Помогать с учебными материалами\n"
+        "📌 Советы для лучшего результата:\n"
+        "1. Формулируйте вопросы четко (например: 'Что такое фотосинтез?')\n"
+        "2. Фотографируйте текст при хорошем освещении\n"
+        "3. Держите камеру параллельно тексту\n"
+        "4. Убедитесь, что текст занимает большую часть кадра\n"
+        "Попробуй отправить мне вопрос или фотографию с заданием!"
     )
-    bot.send_message(message.chat.id, response, reply_markup=create_menu())
+    bot.send_message(
+        message.chat.id,
+        response,
+        reply_markup=create_menu()
+    )
+    logger.info("Приветственное сообщение отправлено")
+
+@bot.message_handler(func=lambda message: message.text == 'ℹ️ Помощь')
+def handle_help(message):
+    send_welcome(message)
 
 @bot.message_handler(func=lambda message: message.text == '📝 Задать вопрос')
 def handle_ask_question(message):
-    msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
+    msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос (например: 'Что такое фотосинтез?'):", reply_markup=None)
     bot.register_next_step_handler(msg, process_text_question)
 
 def process_text_question(message):
@@ -88,32 +107,29 @@ def process_text_question(message):
             bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
             return
 
-        # Уведомляем пользователя, что бот думает
+        # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
-        status_msg = bot.send_message(chat_id, "⏳ Думаю...")
 
-        # Получаем ответ от DeepSeek
+        # Пытаемся получить ответ от DeepSeek
         answer = query_deepseek_api(question)
         
-        # Обновляем сообщение со статусом
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg.message_id,
-            text=f"✅ Ответ получен!"
-        )
-        
-        # Формируем и отправляем ответ
-        response_text = f"<b>Вопрос:</b> {question}\n\n<b>Ответ:</b> {answer or 'Извините, не удалось получить ответ от ИИ.'}"
-        bot.send_message(
-            chat_id=chat_id,
-            text=response_text,
-            parse_mode='HTML',
-            reply_markup=create_menu()
-        )
-        
-        # Сохраняем в историю
-        save_history(chat_id, question, answer)
-        logger.info("Ответ на текстовый вопрос отправлен")
+        if answer:
+            # Отправляем ответ от DeepSeek
+            response_text = f"<b>Вопрос:</b> {question}\n\n<b>Ответ:</b> {answer}"
+            save_history(chat_id, question, response_text)
+            bot.send_message(
+                chat_id,
+                response_text,
+                parse_mode='HTML',
+                reply_markup=create_menu()
+            )
+            logger.info("Ответ на текстовый вопрос отправлен")
+        else:
+            # Если DeepSeek не работает, пытаемся найти информацию через другой источник (например, DuckDuckGo)
+            logger.warning("DeepSeek API недоступен, используем резервный поиск...")
+            # Здесь можно добавить резервный поиск через DuckDuckGo или другой источник
+            response_text = "Извините, не удалось получить ответ от ИИ. Попробуйте переформулировать вопрос."
+            bot.send_message(chat_id, response_text, reply_markup=create_menu())
 
     except Exception as e:
         logger.error(f"Ошибка в process_text_question: {str(e)}")
@@ -121,12 +137,7 @@ def process_text_question(message):
 
 @app.route('/')
 def home():
-    return "🤖 Telegram AI Bot активен! Используйте /start в Telegram"
-
-@app.route('/health')
-def health_check():
-    """Endpoint для проверки работоспособности"""
-    return "OK", 200
+    return "🤖 Telegram Study Bot активен! Используйте /start в Telegram"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -139,7 +150,7 @@ def webhook():
             return '', 200
         return 'Bad request', 400
     except Exception as e:
-        logger.error(f"Ошибка в webhook: {e}")
+        logger.error(f"Ошибка в webhook: {str(e)}")
         return 'Server error', 500
 
 def configure_webhook():
@@ -157,7 +168,6 @@ def configure_webhook():
                     return
                 bot.remove_webhook()
                 logger.info("Старый вебхук удален")
-                
                 def set_webhook_background():
                     time.sleep(3)
                     try:
@@ -167,7 +177,6 @@ def configure_webhook():
                         logger.info(f"Информация о вебхуке: {webhook_info}")
                     except Exception as e:
                         logger.error(f"Ошибка установки вебхука: {e}")
-                
                 thread = threading.Thread(target=set_webhook_background)
                 thread.daemon = True
                 thread.start()
@@ -177,7 +186,7 @@ def configure_webhook():
         bot.remove_webhook()
         logger.info("Вебхук удален, используется polling")
     except Exception as e:
-        logger.error(f"Ошибка настройки вебхука: {e}")
+        logger.error(f"Ошибка настройки вебхука: {str(e)}")
 
 # Установка вебхука
 configure_webhook()
