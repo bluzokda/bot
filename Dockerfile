@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bullseye
+FROM python:3.11-slim-bullseye
 
 # Установка Tesseract и языков
 RUN apt-get update && apt-get install -y \
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
 
 # Настройка переменных окружения
 ENV PYTESSERACT_TESSERACT_CMD=/usr/bin/tesseract
+ENV PYTHONUNBUFFERED=1
 
 # Установка рабочей директории
 WORKDIR /app
@@ -23,4 +24,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Команда запуска
-CMD ["python", "bot.py"]  # Изменили команду запуска!
+CMD ["python", "bot.py"]
