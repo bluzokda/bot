@@ -1,5 +1,3 @@
-FROM python:3.11-slim-bullseye
-
 # Установка Tesseract и языков
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
@@ -25,5 +23,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копирование исходного кода
 COPY . .
 
-# Команда запуска
-CMD ["gunicorn", "--workers", "1", "--timeout", "600", "--bind", "0.0.0.0:$PORT", "bot:app"]
+# Команда запуска (используем polling, как в bot.py)
+CMD ["python", "bot.py"]
