@@ -1,4 +1,8 @@
-aiogram==3.5.1
+pyTelegramBotAPI==4.16.1
 requests==2.32.3
-python-dotenv==1.0.1
-Pillow==10.3.0
+beautifulsoup4==4.12.3
+lxml==5.2.1
+Flask==3.0.3
+gunicorn==21.2.0
+pytesseract==0.3.10
+Pillow==10.4.0
