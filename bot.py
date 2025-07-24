@@ -15,6 +15,7 @@ import io
 import re
 import requests
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,14 +25,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"  # Убрал лишний пробел
+API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
 HF_TOKEN = os.getenv("HF_TOKEN")
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 OCR_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
 
 # Кэш контекста пользователей
 user_context = {}
+user_last_activity = {}
 executor = ThreadPoolExecutor(max_workers=4)
+
+# Очистка старого контекста (через 1 час неактивности)
+async def cleanup_old_contexts():
+    while True:
+        await asyncio.sleep(3600)  # Каждый час
+        current_time = time.time()
+        to_remove = []
+        for user_id, last_time in user_last_activity.items():
+            if current_time - last_time > 3600:  # 1 час
+                to_remove.append(user_id)
+        
+        for user_id in to_remove:
+            if user_id in user_context:
+                del user_context[user_id]
+            del user_last_activity[user_id]
+            logger.info(f"Cleaned up context for inactive user {user_id}")
 
 def sync_image_to_text(image_bytes: bytes) -> str:
     """Синхронная обработка изображения"""
@@ -52,7 +70,8 @@ def sync_image_to_text(image_bytes: bytes) -> str:
             lang='rus+eng',
             config=OCR_CONFIG
         )
-        return re.sub(r'\s+', ' ', text).strip() or "Не удалось распознать текст."
+        cleaned_text = re.sub(r'\s+', ' ', text).strip()
+        return cleaned_text if cleaned_text else "Не удалось распознать текст."
     except Exception as e:
         logger.exception("OCR error")
         return "Ошибка обработки изображения"
@@ -88,11 +107,18 @@ async def get_answer(question: str, context: str) -> str:
         
         if response.status_code == 200:
             result = response.json()
-            return result.get('answer', 'Ответ не найден')
+            answer = result.get('answer', 'Ответ не найден')
+            # Если ответ слишком короткий или неинформативный
+            if not answer or len(answer.strip()) < 2:
+                return "Не удалось найти точный ответ. Попробуйте переформулировать вопрос."
+            return answer
             
         elif response.status_code == 503:
             retry_after = int(response.headers.get('Retry-After', 30))
             return f"🚧 Модель загружается, попробуйте через {retry_after} секунд"
+            
+        elif response.status_code == 429:
+            return "⏰ Превышен лимит запросов. Попробуйте позже."
             
         else:
             logger.error(f"API error {response.status_code}: {response.text[:200]}")
@@ -100,6 +126,8 @@ async def get_answer(question: str, context: str) -> str:
             
     except requests.exceptions.Timeout:
         return "⌛ Таймаут соединения с API"
+    except requests.exceptions.ConnectionError:
+        return "🔌 Ошибка подключения к API"
     except Exception as e:
         logger.exception("HF request exception")
         return f"⚠️ Ошибка: {str(e)}"
@@ -122,6 +150,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_bytes = await photo_file.download_to_memory()
         image_data = image_bytes.getbuffer().tobytes()
         
+        # Обновляем время активности пользователя
+        user_last_activity[user_id] = time.time()
+        
         text = await image_to_text(image_data)
         
         # Проверка результата распознавания
@@ -130,7 +161,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         user_context[user_id] = text
-        logger.info(f"Saved context for user {user_id}: {text[:50]}...")
+        logger.info(f"Saved context for user {user_id}: {len(text)} characters")
         response = f"✅ Текст распознан ({len(text)} символов)\nТеперь вы можете задавать вопросы по этому тексту"
         await msg.reply_text(response)
     except Exception as e:
@@ -152,29 +183,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
     
-    # Команда сброса
-    if user_text.lower() in ['/start', '/clear', '/new']:
-        if user_id in user_context:
-            del user_context[user_id]
-            logger.info(f"Context cleared for user {user_id}")
-        await msg.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
-        return
-    
-    # Команда помощи
-    if user_text.lower() in ['/help', '/помощь']:
-        help_text = (
-            "🤖 *Помощь по боту*\n\n"
-            "Отправьте фото с текстом (тест, контрольная и т.д.), а затем задавайте вопросы по нему.\n\n"
-            "Команды:\n"
-            "/start, /new, /clear - очистить текущий контекст\n"
-            "/help - показать это сообщение\n\n"
-            "После отправки фото задавайте вопросы по тексту, например:\n"
-            "• Какой ответ на вопрос 5?\n"
-            "• Решение задачи 3\n"
-            "• Что написано в пункте 2.1?"
-        )
-        await msg.reply_text(help_text, parse_mode="Markdown")
-        return
+    # Обновляем время активности пользователя
+    user_last_activity[user_id] = time.time()
     
     # Проверка контекста
     if user_id not in user_context:
@@ -187,8 +197,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Получение контекста и ответа
     context_text = user_context.get(user_id, "")
-    if not context_text:
-        await msg.reply_text("⚠️ Контекст пуст. Отправьте новое изображение.")
+    if not context_text or len(context_text) < 10:
+        await msg.reply_text("⚠️ Контекст пуст или слишком короткий. Отправьте новое изображение.")
         return
         
     await msg.reply_chat_action(action="typing")
@@ -199,7 +209,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Форматирование ответа
         response = f"❓ *Вопрос:* {user_text}\n\n💡 *Ответ:* {answer}\n\n"
-        response += "Для нового запроса отправьте /new"
+        response += "_Для нового запроса отправьте /new_"
         
         await status_msg.edit_text(response, parse_mode="Markdown")
     except Exception as e:
@@ -210,33 +220,43 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
     await update.message.reply_text(
-        f"Привет, {user.first_name}!\n\n"
-        "Отправьте фото с текстом (тест, контрольная и т.д.), "
-        "а затем задавайте вопросы по его содержанию.\n\n"
-        "Используйте /help для получения дополнительной информации."
+        f"Привет, {user.first_name}! 👋\n\n"
+        "🤖 *Как пользоваться ботом:*\n"
+        "1. Отправь фото с текстом (тест, контрольная и т.д.)\n"
+        "2. Задавай вопросы по содержимому фото\n\n"
+        "💡 *Команды:*\n"
+        "/help - помощь по командам\n"
+        "/new - начать с нового изображения\n\n"
+        "_Бот запоминает текст с последнего отправленного фото_",
+        parse_mode="Markdown"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
         "🤖 *Помощь по боту*\n\n"
-        "Отправьте фото с текстом (тест, контрольная и т.д.), а затем задавайте вопросы по нему.\n\n"
-        "Команды:\n"
-        "/start, /new, /clear - очистить текущий контекст\n"
-        "/help - показать это сообщение\n\n"
-        "После отправки фото задавайте вопросы по тексту, например:\n"
+        "📸 *Отправьте фото* с текстом (тест, контрольная и т.д.)\n"
+        "❓ *Задавайте вопросы* по содержимому фото\n\n"
+        "🔧 *Команды:*\n"
+        "• /start - начать работу\n"
+        "• /new - очистить контекст и начать заново\n"
+        "• /help - показать помощь\n\n"
+        "📝 *Примеры вопросов:*\n"
         "• Какой ответ на вопрос 5?\n"
         "• Решение задачи 3\n"
-        "• Что написано в пункте 2.1?"
+        "• Что написано в пункте 2.1?\n\n"
+        "_Контекст сохраняется 1 час после последней активности_"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /clear"""
+async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /new"""
     user_id = update.effective_user.id
     if user_id in user_context:
         del user_context[user_id]
-        logger.info(f"Context cleared for user {user_id}")
+    if user_id in user_last_activity:
+        del user_last_activity[user_id]
+    logger.info(f"Context cleared for user {user_id}")
     await update.message.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
 
 def main() -> None:
@@ -253,15 +273,18 @@ def main() -> None:
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("new", clear_command))
-    application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(CommandHandler("new", new_command))
+    application.add_handler(CommandHandler("clear", new_command))
     
     # Обработчики по типу контента
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
+    # Запуск задачи очистки старых контекстов
+    application.job_queue.run_once(lambda _: asyncio.create_task(cleanup_old_contexts()), 1)
+    
     logger.info("Бот запущен")
-    application.run_polling()
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     try:
