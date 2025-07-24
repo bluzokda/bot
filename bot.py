@@ -12,7 +12,7 @@ import re
 import time
 import json
 from urllib.parse import quote_plus
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup  # Добавлен импорт BeautifulSoup
 
 # Настройка логирования
 logging.basicConfig(
@@ -70,18 +70,18 @@ def search_duckduckgo_html(query):
         logger.info(f"Поиск в DuckDuckGo HTML: {query}")
         encoded_query = quote_plus(query)
         url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=ru-ru"
-        
+
         response = requests.get(url, headers=HEADERS, timeout=15)
         logger.info(f"DuckDuckGo HTML status: {response.status_code}")
-        
+
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             results = []
-            
+
             # Ищем результаты
             result_divs = soup.find_all('div', class_='result')[:5]
             logger.info(f"DuckDuckGo HTML found {len(result_divs)} result divs")
-            
+
             for div in result_divs:
                 try:
                     title_elem = div.find('a', class_='result__a')
@@ -90,7 +90,7 @@ def search_duckduckgo_html(query):
                         url = title_elem.get('href', '#')
                         snippet_elem = div.find('a', class_='result__snippet')
                         snippet = snippet_elem.get_text(strip=True) if snippet_elem else "Описание отсутствует"
-                        
+
                         # Фильтруем пустые результаты
                         if title and snippet and len(title.strip()) > 3 and len(snippet.strip()) > 5:
                             results.append({
@@ -101,7 +101,7 @@ def search_duckduckgo_html(query):
                 except Exception as e:
                     logger.error(f"Ошибка парсинга результата DuckDuckGo: {str(e)}")
                     continue
-            
+
             if results:
                 logger.info(f"Найдено в DuckDuckGo HTML: {len(results)} результатов")
                 return results
@@ -120,24 +120,24 @@ def search_searx_api(query):
         encoded_query = quote_plus(query)
         # Используем публичный экземпляр Searx
         url = f"https://searx.work/search?q={encoded_query}&language=ru&format=json&categories=general"
-        
+
         response = requests.get(url, headers=HEADERS, timeout=15)
         logger.info(f"Searx API status: {response.status_code}")
-        
+
         if response.status_code == 200:
             data = response.json()
             results = []
             search_results = data.get("results", [])
-            
+
             logger.info(f"Searx API found {len(search_results)} results")
-            
+
             for item in search_results[:5]:  # Только топ-5
                 # Проверяем обязательные поля
                 if "title" in item and "content" in item:
                     title = item.get("title", "Без названия")
                     snippet = item.get("content", "Описание отсутствует")
                     url = item.get("url", "#")
-                    
+
                     # Фильтруем пустые результаты
                     if title and snippet and len(title.strip()) > 6 and len(snippet.strip()) > 10:
                         results.append({
@@ -145,7 +145,7 @@ def search_searx_api(query):
                             "url": url,
                             "snippet": snippet[:300]
                         })
-            
+
             if results:
                 logger.info(f"Найдено в Searx API: {len(results)} результатов")
                 return results
@@ -161,21 +161,21 @@ def search_internet(query):
     """Ищет информацию по запросу через несколько источников"""
     try:
         logger.info(f"Поисковый запрос: {query}")
-        
+
         # Пробуем DuckDuckGo HTML (основной)
         logger.info("Пробуем DuckDuckGo HTML...")
         results = search_duckduckgo_html(query)
         if results and len(results) > 0:
             logger.info("Успешно получены результаты от DuckDuckGo HTML")
             return results
-            
+
         # Если DuckDuckGo не сработал, пробуем Searx API (резерв)
         logger.info("DuckDuckGo HTML не дал результатов, пробуем Searx API...")
         results = search_searx_api(query)
         if results and len(results) > 0:
             logger.info("Успешно получены результаты от Searx API")
             return results
-            
+
         logger.warning("Не удалось получить результаты ни от одного источника")
         return [
             {
@@ -184,7 +184,7 @@ def search_internet(query):
                 "snippet": "К сожалению, не удалось найти информацию по вашему запросу. Попробуйте переформулировать вопрос или использовать другие ключевые слова."
             }
         ]
-        
+
     except Exception as e:
         logger.error(f"Ошибка общего поиска: {str(e)}")
         return [
@@ -300,17 +300,17 @@ def process_text_question(message):
         chat_id = message.chat.id
         question = message.text
         logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
-        
+
         if len(question) < 3:
             bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
             return
-        
+
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
-        
+
         # Ищем ответ
         search_results = search_internet(question)
-        
+
         response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
         for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
             # Укорачиваем слишком длинные заголовки
@@ -321,10 +321,10 @@ def process_text_question(message):
                 response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
             else:
                 response_text += "\n"
-        
+
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
-        
+
         bot.send_message(
             chat_id=chat_id,
             text=response_text,
@@ -333,7 +333,7 @@ def process_text_question(message):
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
-        
+
     except Exception as e:
         logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
@@ -356,7 +356,7 @@ def handle_photo(message):
         logger.info(f"OCR занял {elapsed_time:.2f} секунд")
         if not text or len(text) < 10:
             bot.send_message(
-                chat_id, 
+                chat_id,
                 "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
                 reply_markup=create_menu()
             )
@@ -372,7 +372,7 @@ def handle_photo(message):
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
         search_results = search_internet(text)
-        
+
         response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
         for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
             # Укорачиваем слишком длинные заголовки
@@ -383,10 +383,10 @@ def handle_photo(message):
                 response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
             else:
                 response_text += "\n"
-        
+
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
-        
+
         bot.send_message(
             chat_id=chat_id,
             text=response_text,
