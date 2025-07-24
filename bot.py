@@ -12,7 +12,7 @@ import re
 import time
 import json
 from urllib.parse import quote_plus
-from bs4 import BeautifulSoup  # Добавлен импорт BeautifulSoup
+from bs4 import BeautifulSoup
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,6 +24,8 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
+
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
@@ -51,6 +53,14 @@ HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
     "Cache-Control": "max-age=0"
+}
+
+# OpenRouter API настройки
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": "https://bot-wwg6.onrender.com",  # Замени на URL твоего бота
+    "X-Title": "Study Bot",
+    "Content-Type": "application/json"
 }
 
 # Хранение истории
@@ -113,89 +123,66 @@ def search_duckduckgo_html(query):
         logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
     return None
 
-def search_wikipedia(query):
-    """Поиск через Wikipedia API (бесплатный, без ключа) - запасной метод"""
+def get_ai_answer(question, context):
+    """Получает ответ от ИИ через OpenRouter"""
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY не установлен")
+        return None
+
     try:
-        logger.info(f"Поиск в Wikipedia (резерв): {query}")
-        # Сначала ищем статьи
-        search_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{quote_plus(query)}"
+        logger.info(f"Запрос к OpenRouter: {question}")
         
-        response = requests.get(search_url, headers=HEADERS, timeout=15)
-        logger.info(f"Wikipedia status: {response.status_code}")
+        # Формируем сообщения для чат-модели
+        messages = [
+            {
+                "role": "system",
+                "content": "Ты помощник по учебе. Отвечай четко и по делу на русском языке. Используй информацию из контекста для ответа."
+            },
+            {
+                "role": "user",
+                "content": f"Контекст: {context}\n\nВопрос: {question}"
+            }
+        ]
+
+        payload = {
+            "model": "openai/gpt-3.5-turbo",  # Можно изменить на другую модель
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=OPENROUTER_HEADERS,
+            json=payload,
+            timeout=30
+        )
+
+        logger.info(f"OpenRouter status: {response.status_code}")
 
         if response.status_code == 200:
             data = response.json()
-            results = []
-            
-            title = data.get("title", "Без названия")
-            snippet = data.get("extract", "Описание отсутствует")
-            url = data.get("content_urls", {}).get("desktop", {}).get("page", "#")
-            
-            if title and snippet:
-                results.append({
-                    "title": title[:150],
-                    "url": url,
-                    "snippet": snippet[:300]
-                })
-                logger.info(f"Найдено в Wikipedia: 1 результат")
-                return results
-        elif response.status_code == 404:
-            # Если точное совпадение не найдено, пробуем поиск
-            search_url = f"https://ru.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'format': 'json',
-                'list': 'search',
-                'srsearch': query,
-                'srlimit': 3
-            }
-            
-            search_response = requests.get(search_url, params=params, headers=HEADERS, timeout=15)
-            if search_response.status_code == 200:
-                search_data = search_response.json()
-                results = []
-                search_results = search_data.get("query", {}).get("search", [])
-                
-                for item in search_results:
-                    title = item.get("title", "Без названия")
-                    snippet = item.get("snippet", "Описание отсутствует")
-                    # Очищаем HTML теги из сниппета
-                    snippet = re.sub(r'<.*?>', '', snippet)
-                    url = f"https://ru.wikipedia.org/wiki/{quote_plus(title)}"
-                    
-                    if title and snippet:
-                        results.append({
-                            "title": title[:150],
-                            "url": url,
-                            "snippet": snippet[:300]
-                        })
-                
-                if results:
-                    logger.info(f"Найдено в Wikipedia поиске: {len(results)} результатов")
-                    return results
+            answer = data['choices'][0]['message']['content'].strip()
+            logger.info(f"Получен ответ от OpenRouter: {len(answer)} символов")
+            return answer
         else:
-            logger.warning(f"Wikipedia вернул статус {response.status_code}")
+            logger.error(f"OpenRouter вернул статус {response.status_code}: {response.text}")
+            return None
+
     except Exception as e:
-        logger.error(f"Ошибка поиска в Wikipedia: {str(e)}")
-    return None
+        logger.error(f"Ошибка запроса к OpenRouter: {str(e)}")
+        return None
 
 def search_internet(query):
-    """Ищет информацию по запросу через несколько источников"""
+    """Ищет информацию по запросу через DuckDuckGo HTML"""
     try:
         logger.info(f"Поисковый запрос: {query}")
 
-        # Пробуем DuckDuckGo HTML (основной)
+        # Пробуем DuckDuckGo HTML
         logger.info("Пробуем DuckDuckGo HTML...")
         results = search_duckduckgo_html(query)
         if results and len(results) > 0:
             logger.info("Успешно получены результаты от DuckDuckGo HTML")
-            return results
-
-        # Если DuckDuckGo не сработал, пробуем Wikipedia (резерв)
-        logger.info("DuckDuckGo HTML не дал результатов, пробуем Wikipedia...")
-        results = search_wikipedia(query)
-        if results and len(results) > 0:
-            logger.info("Успешно получены результаты от Wikipedia")
             return results
 
         logger.warning("Не удалось получить результаты ни от одного источника")
@@ -275,7 +262,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Искать ответы на текстовые вопросы\n"
+            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -330,19 +317,38 @@ def process_text_question(message):
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
 
-        # Ищем ответ
+        # Ищем информацию
         search_results = search_internet(question)
+        
+        if not search_results or search_results[0]['title'] == "Поиск не удался":
+            bot.send_message(
+                chat_id, 
+                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                reply_markup=create_menu()
+            )
+            return
 
-        response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
-        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#" and res['url']:
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
-            else:
-                response_text += "\n"
+        # Берем лучший результат как контекст
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
+        url = best_result['url']
+
+        # Пытаемся получить ответ от ИИ
+        ai_answer = get_ai_answer(question, context)
+        
+        if ai_answer:
+            # Возвращаем ответ от ИИ
+            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+        else:
+            # Если ИИ не ответил, возвращаем обычный результат
+            response_text = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
 
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -351,7 +357,7 @@ def process_text_question(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,  # Отключаем для стабильности
+            disable_web_page_preview=True,
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
@@ -395,16 +401,31 @@ def handle_photo(message):
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
         search_results = search_internet(text)
 
-        response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
-        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#" and res['url']:
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
-            else:
-                response_text += "\n"
+        if not search_results or search_results[0]['title'] == "Поиск не удался":
+            bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
+            return
+
+        # Берем лучший результат как контекст
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
+        url = best_result['url']
+
+        # Пытаемся получить ответ от ИИ
+        ai_answer = get_ai_answer(text[:100] + "...", context)  # Используем начало текста как вопрос
+        
+        if ai_answer:
+            # Возвращаем ответ от ИИ
+            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+        else:
+            # Если ИИ не ответил, возвращаем обычный результат
+            response_text = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
 
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -413,7 +434,7 @@ def handle_photo(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,  # Отключаем для стабильности
+            disable_web_page_preview=True,
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
