@@ -3,13 +3,12 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import os
 import asyncio
-from transformers import pipeline
 from PIL import Image
 import pytesseract
 import io
 import re
 import requests
-from io import BytesIO
+import time  # Добавлено для обработки ожидания модели
 
 # Настройка логирования
 logging.basicConfig(
@@ -56,12 +55,16 @@ async def get_answer(question: str, context: str) -> str:
     
     try:
         response = requests.post(API_URL, headers=HEADERS, json=payload)
+        
+        # Обработка разных статусов API
         if response.status_code == 200:
             result = response.json()
             return result['answer'] if result['score'] > 0.01 else "Ответ не найден в тексте"
         elif response.status_code == 503:
-            # Модель загружается
-            return "Модель загружается, попробуйте через 20 секунд"
+            # Модель загружается - пробуем подождать
+            retry_after = int(response.headers.get('Retry-After', 20))
+            logger.warning(f"Model loading, retry after {retry_after}s")
+            return f"Модель загружается, попробуйте через {retry_after} секунд"
         else:
             logger.error(f"API error: {response.status_code} - {response.text}")
             return f"Ошибка API: {response.status_code}"
@@ -96,7 +99,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Команда сброса
-    if user_text.lower() == '/start' or user_text.lower() == '/clear':
+    if user_text.lower() in ['/start', '/clear', '/new']:
         user_context.pop(user_id, None)
         await msg.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
         return
@@ -109,11 +112,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Получение ответа
     context_text = user_context[user_id]
     status_msg = await msg.reply_text("🔍 Анализирую вопрос...")
-    answer = await get_answer(user_text, context_text)
     
-    # Форматирование ответа
-    response = f"❓ Вопрос: {user_text}\n\n💡 Ответ: {answer}\n\n/new - новый запрос"
-    await status_msg.edit_text(response)
+    try:
+        answer = await get_answer(user_text, context_text)
+        
+        # Форматирование ответа
+        response = f"❓ Вопрос: {user_text}\n\n💡 Ответ: {answer}\n\n"
+        response += "Для нового запроса отправьте /new"
+        
+        await status_msg.edit_text(response)
+    except Exception as e:
+        logger.error(f"Error processing question: {e}")
+        await status_msg.edit_text("⚠️ Произошла ошибка при обработке вашего вопроса")
 
 def main() -> None:
     """Запуск бота"""
@@ -125,6 +135,10 @@ def main() -> None:
     
     application = Application.builder().token(token).build()
     application.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
+    
+    # Обработчик команд
+    application.add_handler(MessageHandler(filters.Regex(r'^/(start|clear|new)$'), handle_message))
+    
     application.run_polling()
 
 if __name__ == "__main__":
