@@ -10,6 +10,7 @@ from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import re
 import time
+from bs4 import BeautifulSoup
 import json
 
 # Настройка логирования
@@ -38,13 +39,6 @@ except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
 
-# Настройки поиска
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-}
-
 # Хранение истории
 user_history = {}
 
@@ -56,19 +50,114 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_internet(query):
-    """Ищет информацию по запросу через DuckDuckGo API"""
+def search_google(query):
+    """Поиск в Google через пользовательский агент"""
     try:
-        logger.info(f"Поисковый запрос: {query}")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        }
         
-        # Форматируем запрос для API
+        # Формируем URL для Google поиска
+        search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&hl=ru&num=5"
+        
+        response = requests.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем результаты поиска
+        results = []
+        search_results = soup.find_all('div', class_='g')[:5]  # Первые 5 результатов
+        
+        for result in search_results:
+            try:
+                title_elem = result.find('h3')
+                if title_elem:
+                    title = title_elem.get_text()
+                    
+                    # Ищем сниппет
+                    snippet_elem = result.find('span')
+                    snippet = snippet_elem.get_text() if snippet_elem else "Описание отсутствует"
+                    
+                    # Ищем ссылку
+                    link_elem = result.find('a')
+                    url = link_elem['href'] if link_elem and link_elem.get('href') else "#"
+                    
+                    if title and snippet:
+                        results.append({
+                            "title": title,
+                            "url": url,
+                            "snippet": snippet
+                        })
+            except Exception as e:
+                continue
+                
+        return results if results else None
+    except Exception as e:
+        logger.error(f"Ошибка поиска в Google: {str(e)}")
+        return None
+
+def search_yandex(query):
+    """Поиск в Яндекс через пользовательский агент"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        }
+        
+        # Формируем URL для Яндекс поиска
+        search_url = f"https://yandex.ru/search/?text={requests.utils.quote(query)}&lr=213"
+        
+        response = requests.get(search_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем результаты поиска
+        results = []
+        search_results = soup.find_all('li', class_='serp-item')[:5]  # Первые 5 результатов
+        
+        for result in search_results:
+            try:
+                title_elem = result.find('h2')
+                if title_elem:
+                    title = title_elem.get_text()
+                    
+                    # Ищем сниппет
+                    snippet_elem = result.find('span', class_='OrganicTextContentSpan')
+                    snippet = snippet_elem.get_text() if snippet_elem else "Описание отсутствует"
+                    
+                    # Ищем ссылку
+                    link_elem = result.find('a')
+                    url = link_elem['href'] if link_elem and link_elem.get('href') else "#"
+                    
+                    if title and snippet:
+                        results.append({
+                            "title": title,
+                            "url": url,
+                            "snippet": snippet
+                        })
+            except Exception as e:
+                continue
+                
+        return results if results else None
+    except Exception as e:
+        logger.error(f"Ошибка поиска в Яндекс: {str(e)}")
+        return None
+
+def search_duckduckgo(query):
+    """Поиск в DuckDuckGo API"""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        }
+        
         formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
         url = f"https://api.duckduckgo.com/?q={formatted_query}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
         
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        data = response.json()
         
+        data = response.json()
         results = []
         
         # Основной результат
@@ -88,79 +177,87 @@ def search_internet(query):
                     "snippet": topic["Text"]
                 })
         
-        # Результаты из внешних источников
-        for result in data.get("Results", [])[:5]:
-            results.append({
-                "title": result.get("Text", "Без названия"),
-                "url": result.get("FirstURL", "#"),
-                "snippet": result.get("Text", "Описание отсутствует")
-            })
-        
-        logger.info(f"Найдено результатов: {len(results)}")
         return results if results else None
+    except Exception as e:
+        logger.error(f"Ошибка поиска в DuckDuckGo: {str(e)}")
+        return None
+
+def find_best_answer(query):
+    """Ищет лучший ответ, используя несколько поисковых систем"""
+    try:
+        logger.info(f"Поиск лучшего ответа для: {query}")
+        
+        # Сначала пробуем DuckDuckGo (часто дает точные ответы)
+        ddg_results = search_duckduckgo(query)
+        if ddg_results:
+            # Проверяем, есть ли точный ответ
+            for result in ddg_results:
+                if "Основной результат" in result.get("title", "") or len(result.get("snippet", "")) > 50:
+                    return [result]  # Возвращаем точный ответ
+        
+        # Если DuckDuckGo не дал точного ответа, ищем в Google
+        google_results = search_google(query)
+        if google_results:
+            return google_results[:3]  # Возвращаем топ-3 результатов
+        
+        # Если Google не сработал, пробуем Яндекс
+        yandex_results = search_yandex(query)
+        if yandex_results:
+            return yandex_results[:3]  # Возвращаем топ-3 результатов
+        
+        # Если ничего не нашли, возвращаем DuckDuckGo результаты
+        return ddg_results[:3] if ddg_results else None
         
     except Exception as e:
-        logger.error(f"Ошибка поиска: {str(e)}")
+        logger.error(f"Ошибка поиска лучшего ответа: {str(e)}")
         return None
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
     if user_id not in user_history:
         user_history[user_id] = []
-    
     # Сохраняем только последние 10 записей
     if len(user_history[user_id]) >= 10:
         user_history[user_id].pop(0)
-    
     user_history[user_id].append({
         "question": question,
-        "response": response
+        "response": response,
+        "timestamp": time.time()
     })
 
 def process_image(image_data):
     """Распознает текст на изображении с улучшенной предобработкой"""
     try:
         image = Image.open(io.BytesIO(image_data))
-        
         # Конвертация в градации серого
         if image.mode != 'L':
             image = image.convert('L')
-        
         # Автоконтраст
         image = ImageOps.autocontrast(image, cutoff=10)
-        
         # Увеличение контраста
         enhancer = ImageEnhance.Contrast(image)
         image = enhancer.enhance(2.5)
-        
         # Увеличение резкости
         enhancer = ImageEnhance.Sharpness(image)
         image = enhancer.enhance(3.0)
-        
         # Легкое размытие для уменьшения шума
         image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        
-        # Бинаризация (адаптивное пороговое преобразование)
+        # Бинаризация
         image = ImageOps.autocontrast(image)
         image = image.point(lambda p: 255 if p > 160 else 0)
-        
         # Масштабирование для мелкого текста
         if min(image.size) < 1000:
             scale_factor = max(2500 / min(image.size), 2.5)
             new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
             image = image.resize(new_size, Image.LANCZOS)
-        
         # Повышение резкости после масштабирования
         enhancer = ImageEnhance.Sharpness(image)
         image = enhancer.enhance(2.0)
-        
         # Распознаем текст с оптимальными параметрами
         custom_config = r'--oem 3 --psm 6 -l rus+eng'
         text = pytesseract.image_to_string(image, config=custom_config)
-        
         # Очистка текста
         text = re.sub(r'\s+', ' ', text).strip()
-        
         logger.info(f"Распознано символов: {len(text)}")
         return text
     except Exception as e:
@@ -172,16 +269,16 @@ def send_welcome(message):
     try:
         logger.info(f"Обработка команды /start от {message.chat.id}")
         response = (
-            "👋 Привет! Я твой бот-помощник для учебы!\n\n"
+            "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
             "• Искать ответы на текстовые вопросы\n"
             "• Распознавать текст с фотографий\n"
-            "• Помогать с учебными материалами\n\n"
+            "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
             "1. Формулируйте вопросы четко (например: 'Что такое фотосинтез?')\n"
             "2. Фотографируйте текст при хорошем освещении\n"
             "3. Держите камеру параллельно тексту\n"
-            "4. Убедитесь, что текст занимает большую часть кадра\n\n"
+            "4. Убедитесь, что текст занимает большую часть кадра\n"
             "Попробуй отправить мне вопрос или фотографию с заданием!"
         )
         bot.send_message(
@@ -211,7 +308,7 @@ def handle_ask_question(message):
 def handle_ask_photo(message):
     try:
         logger.info(f"Запрос на отправку фото от {message.chat.id}")
-        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:\n\n• Сфокусируйтесь на тексте\n• Обеспечьте хорошее освещение\n• Держите камеру параллельно тексту", reply_markup=None)
+        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:\n• Сфокусируйтесь на тексте\n• Обеспечьте хорошее освещение\n• Держите камеру параллельно тексту", reply_markup=None)
     except Exception as e:
         logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
@@ -225,32 +322,28 @@ def process_text_question(message):
         if len(question) < 3:
             bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
             return
-            
+        
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
         
-        # Ищем ответ
-        search_results = search_internet(question)
+        # Ищем лучший ответ
+        search_results = find_best_answer(question)
         
         if not search_results:
             bot.send_message(
                 chat_id, 
-                "❌ По вашему запросу ничего не найдено.\n\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
                 reply_markup=create_menu()
             )
             return
         
-        response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
-        for i, res in enumerate(search_results, 1):
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#":
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n\n"
-            else:
-                response_text += "\n"
+        # Формируем ответ с лучшим результатом
+        best_result = search_results[0]
+        response_text = f"🔍 <b>Лучший ответ на ваш вопрос:</b>\n\n"
+        response_text += f"<b>{best_result['title']}</b>\n"
+        response_text += f"<i>{best_result['snippet']}</i>\n"
+        if best_result['url'] != "#":
+            response_text += f"\n<a href='{best_result['url']}'>🔗 Подробнее</a>"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -263,6 +356,7 @@ def process_text_question(message):
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
+        
     except Exception as e:
         logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
@@ -272,63 +366,47 @@ def handle_photo(message):
     try:
         chat_id = message.chat.id
         logger.info(f"Получено фото от {chat_id}")
-        
         # Получаем фото с наилучшим качеством
         file_id = message.photo[-1].file_id
         file_info = bot.get_file(file_id)
         file_data = bot.download_file(file_info.file_path)
-        
         bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
         bot.send_chat_action(chat_id, 'typing')
-        
         # Распознаем текст
         start_time = time.time()
         text = process_image(file_data)
         elapsed_time = time.time() - start_time
         logger.info(f"OCR занял {elapsed_time:.2f} секунд")
-        
         if not text or len(text) < 10:
             bot.send_message(
                 chat_id, 
-                "❌ Не удалось распознать текст на фото.\n\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
+                "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
                 reply_markup=create_menu()
             )
             return
-        
         # Обрезаем длинный текст для отображения
         display_text = text[:300] + "..." if len(text) > 300 else text
-        
         bot.send_message(
             chat_id,
-            f"📝 Распознанный текст:\n\n<code>{display_text}</code>",
+            f"📝 Распознанный текст:\n<code>{display_text}</code>",
             parse_mode='HTML',
             reply_markup=create_menu()
         )
-        
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
-        search_results = search_internet(text)
+        search_results = find_best_answer(text)
         
         if not search_results:
-            # Попробуем найти по ключевым словам
-            keywords = ' '.join(text.split()[:10])
-            search_results = search_internet(keywords)
-            
-            if not search_results:
-                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
-                return
+            bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
+            return
         
-        response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
-        for i, res in enumerate(search_results, 1):
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#":
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n\n"
-            else:
-                response_text += "\n"
+        # Формируем ответ с лучшим результатом
+        best_result = search_results[0]
+        response_text = f"🔍 <b>Лучший ответ на ваше задание:</b>\n\n"
+        response_text += f"<b>{best_result['title']}</b>\n"
+        response_text += f"<i>{best_result['snippet']}</i>\n"
+        if best_result['url'] != "#":
+            response_text += f"\n<a href='{best_result['url']}'>🔗 Подробнее</a>"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -341,7 +419,6 @@ def handle_photo(message):
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
-        
     except Exception as e:
         logger.error(f"Ошибка обработки фото: {str(e)}")
         bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
@@ -351,24 +428,19 @@ def handle_history(message):
     try:
         chat_id = message.chat.id
         logger.info(f"Обработка 'История' от {chat_id}")
-        
         if chat_id not in user_history or not user_history[chat_id]:
             bot.send_message(chat_id, "📭 История запросов пуста.", reply_markup=create_menu())
             return
-        
         history = user_history[chat_id]
         response = "📚 Ваша история запросов:\n\n"
-        
         for i, item in enumerate(reversed(history), 1):
             # Обрезаем длинные вопросы
             question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
-            
             response += f"<b>{i}. Вопрос:</b> {question}\n"
             # Показываем первый результат из ответа
-            first_result = item['response'].split('\n\n')[0] if '\n\n' in item['response'] else item['response'][:100] + "..."
+            first_result = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
             response += f"<b>Ответ:</b> {first_result}\n"
-            response += "─" * 20 + "\n\n"
-        
+            response += "─" * 20 + "\n"
         bot.send_message(
             chat_id,
             response,
@@ -395,7 +467,6 @@ def webhook():
         if request.headers.get('content-type') == 'application/json':
             json_data = request.get_json()
             logger.info("Получен webhook-запрос")
-            
             update = telebot.types.Update.de_json(json_data)
             bot.process_new_updates([update])
             return '', 200
@@ -412,7 +483,6 @@ def configure_webhook():
             external_url = os.environ.get('RENDER_EXTERNAL_URL')
             if external_url:
                 webhook_url = f"{external_url}/webhook"
-                
                 # Проверка доступности бота
                 try:
                     bot.get_me()
@@ -420,11 +490,9 @@ def configure_webhook():
                 except Exception as e:
                     logger.error(f"Ошибка доступа к боту: {str(e)}")
                     return
-                
                 # Удаляем существующий вебхук перед установкой нового
                 bot.remove_webhook()
                 logger.info("Старый вебхук удален")
-                
                 # Устанавливаем новый вебхук в фоновом потоке
                 def set_webhook_background():
                     import time
@@ -432,20 +500,17 @@ def configure_webhook():
                     try:
                         bot.set_webhook(url=webhook_url)
                         logger.info(f"Вебхук установлен: {webhook_url}")
-                        
                         # Проверяем информацию о вебхуке
                         webhook_info = bot.get_webhook_info()
                         logger.info(f"Информация о вебхуке: {webhook_info}")
                     except Exception as e:
                         logger.error(f"Ошибка установки вебхука: {str(e)}")
-                
                 thread = threading.Thread(target=set_webhook_background)
                 thread.daemon = True
                 thread.start()
                 return
             else:
                 logger.warning("RENDER_EXTERNAL_URL не найден!")
-        
         # Для других платформ/локального запуска
         bot.remove_webhook()
         logger.info("Вебхук удален, используется polling")
