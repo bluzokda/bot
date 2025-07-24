@@ -2,31 +2,18 @@ import os
 import telebot
 import requests
 import logging
-import pytesseract
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
-import io
 from flask import Flask, request
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
-import re
 import time
 import json
-from urllib.parse import quote_plus
-from transformers import pipeline
-import torch
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-HF_TOKEN = os.environ.get('HF_TOKEN')
-
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
@@ -34,155 +21,43 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
 
-# Проверка доступности Tesseract
-try:
-    tesseract_version = pytesseract.get_tesseract_version()
-    logger.info(f"Tesseract version: {tesseract_version}")
-except Exception as e:
-    logger.error(f"Tesseract check failed: {str(e)}")
-    raise
-
-# Инициализация модели Hugging Face (если токен есть)
-qa_pipeline = None
-if HF_TOKEN:
-    try:
-        logger.info("Загрузка модели Hugging Face...")
-        qa_pipeline = pipeline(
-            "question-answering",
-            model="deepset/roberta-base-squad2",
-            tokenizer="deepset/roberta-base-squad2",
-            device=0 if torch.cuda.is_available() else -1
-        )
-        logger.info("Модель Hugging Face загружена успешно")
-    except Exception as e:
-        logger.error(f"Ошибка загрузки модели Hugging Face: {e}")
-else:
-    logger.warning("HF_TOKEN не найден, ИИ-функции отключены")
-
-# Улучшенные заголовки для обхода блокировок
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "max-age=0"
-}
-
-# Хранение истории
+# Хранение истории (ограничено для экономии памяти)
 user_history = {}
 
 def create_menu():
     """Создает клавиатуру с основными кнопками"""
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(KeyboardButton('📝 Задать вопрос'))
-    markup.add(KeyboardButton('📷 Отправить фото'), KeyboardButton('📚 История'))
-    markup.add(KeyboardButton('ℹ️ Помощь'))
+    markup.add(KeyboardButton('📚 История'))
     return markup
 
-def search_wikipedia(query):
-    """Поиск через Wikipedia API"""
+def query_deepseek_api(prompt):
+    """Отправляет запрос в DeepSeek API"""
     try:
-        logger.info(f"Поиск в Wikipedia: {query}")
-        # Сначала ищем статьи
-        search_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{quote_plus(query)}"
-        
-        response = requests.get(search_url, headers=HEADERS, timeout=15)
-        logger.info(f"Wikipedia status: {response.status_code}")
-
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            
-            title = data.get("title", "Без названия")
-            snippet = data.get("extract", "Описание отсутствует")
-            url = data.get("content_urls", {}).get("desktop", {}).get("page", "#")
-            
-            if title and snippet:
-                results.append({
-                    "title": title[:150],
-                    "url": url,
-                    "snippet": snippet[:300]
-                })
-                logger.info(f"Найдено в Wikipedia: 1 результат")
-                return results
-        elif response.status_code == 404:
-            # Если точное совпадение не найдено, пробуем поиск
-            search_url = f"https://ru.wikipedia.org/w/api.php"
-            params = {
-                'action': 'query',
-                'format': 'json',
-                'list': 'search',
-                'srsearch': query,
-                'srlimit': 3
-            }
-            
-            search_response = requests.get(search_url, params=params, headers=HEADERS, timeout=15)
-            if search_response.status_code == 200:
-                search_data = search_response.json()
-                results = []
-                search_results = search_data.get("query", {}).get("search", [])
-                
-                for item in search_results:
-                    title = item.get("title", "Без названия")
-                    snippet = item.get("snippet", "Описание отсутствует")
-                    # Очищаем HTML теги из сниппета
-                    snippet = re.sub(r'<.*?>', '', snippet)
-                    url = f"https://ru.wikipedia.org/wiki/{quote_plus(title)}"
-                    
-                    if title and snippet:
-                        results.append({
-                            "title": title[:150],
-                            "url": url,
-                            "snippet": snippet[:300]
-                        })
-                
-                if results:
-                    logger.info(f"Найдено в Wikipedia поиске: {len(results)} результатов")
-                    return results
-        else:
-            logger.warning(f"Wikipedia вернул статус {response.status_code}")
+        url = "https://chat.deepseek.com/api/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sk-xxx"  # Замените на ваш токен, если потребуется
+        }
+        data = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        return result['choices'][0]['message']['content'].strip()
     except Exception as e:
-        logger.error(f"Ошибка поиска в Wikipedia: {str(e)}")
-    return None
-
-def get_ai_answer(question, context):
-    """Использует Hugging Face для извлечения точного ответа"""
-    if not qa_pipeline:
-        return None
-        
-    try:
-        logger.info(f"ИИ обрабатывает вопрос: {question}")
-        # Ограничиваем контекст для лучшей производительности
-        context = context[:2000]
-        result = qa_pipeline(question=question, context=context)
-        
-        # Проверяем уверенность модели
-        if result['score'] > 0.1:  # Минимальный порог уверенности
-            answer = result['answer']
-            confidence = result['score']
-            logger.info(f"ИИ ответ: {answer} (уверенность: {confidence:.2f})")
-            return {
-                "answer": answer,
-                "confidence": confidence,
-                "context_used": context[:200] + "..." if len(context) > 200 else context
-            }
-        else:
-            logger.info("ИИ не уверен в ответе")
-            return None
-    except Exception as e:
-        logger.error(f"Ошибка ИИ: {e}")
-        return None
+        logger.error(f"Ошибка запроса к DeepSeek API: {e}")
+        return "Извините, не удалось получить ответ от ИИ."
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
     if user_id not in user_history:
         user_history[user_id] = []
-    # Сохраняем только последние 5 записей
+    # Ограничиваем историю 5 последними запросами
     if len(user_history[user_id]) >= 5:
         user_history[user_id].pop(0)
     user_history[user_id].append({
@@ -190,249 +65,29 @@ def save_history(user_id, question, response):
         "response": response
     })
 
-def process_image(image_data):
-    """Распознает текст на изображении с улучшенной предобработкой"""
-    try:
-        image = Image.open(io.BytesIO(image_data))
-        # Конвертация в градации серого
-        if image.mode != 'L':
-            image = image.convert('L')
-        # Автоконтраст
-        image = ImageOps.autocontrast(image, cutoff=10)
-        # Увеличение контраста
-        enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.5)
-        # Увеличение резкости
-        enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(3.0)
-        # Легкое размытие для уменьшения шума
-        image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        # Бинаризация
-        image = ImageOps.autocontrast(image)
-        image = image.point(lambda p: 255 if p > 160 else 0)
-        # Масштабирование для мелкого текста
-        if min(image.size) < 1000:
-            scale_factor = max(2500 / min(image.size), 2.5)
-            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
-            image = image.resize(new_size, Image.LANCZOS)
-        # Повышение резкости после масштабирования
-        enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(2.0)
-        # Распознаем текст с оптимальными параметрами
-        custom_config = r'--oem 3 --psm 6 -l rus+eng'
-        text = pytesseract.image_to_string(image, config=custom_config)
-        # Очистка текста
-        text = re.sub(r'\s+', ' ', text).strip()
-        logger.info(f"Распознано символов: {len(text)}")
-        return text
-    except Exception as e:
-        logger.error(f"Ошибка OCR: {str(e)}")
-        return None
-
-@bot.message_handler(commands=['start', 'help'])
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
     try:
         logger.info(f"Обработка команды /start от {message.chat.id}")
         response = (
-            "👋 Привет! Я твой бот-помощник для учебы!\n"
-            "Я умею:\n"
-            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
-            "• Распознавать текст с фотографий\n"
-            "• Помогать с учебными материалами\n"
-            "📌 Советы для лучшего результата:\n"
-            "1. Формулируйте вопросы четко (например: 'Что такое фотосинтез?')\n"
-            "2. Фотографируйте текст при хорошем освещении\n"
-            "3. Держите камеру параллельно тексту\n"
-            "4. Убедитесь, что текст занимает большую часть кадра\n"
-            "Попробуй отправить мне вопрос или фотографию с заданием!"
+            "👋 Привет! Я твой ИИ-помощник.\n"
+            "Я умею отвечать на любые вопросы с помощью искусственного интеллекта.\n\n"
+            "Нажми '📝 Задать вопрос' или просто отправь мне сообщение!"
         )
-        bot.send_message(
-            message.chat.id,
-            response,
-            reply_markup=create_menu()
-        )
+        bot.send_message(message.chat.id, response, reply_markup=create_menu())
         logger.info("Приветственное сообщение отправлено")
     except Exception as e:
-        logger.error(f"Ошибка в send_welcome: {str(e)}")
-
-@bot.message_handler(func=lambda message: message.text == 'ℹ️ Помощь')
-def handle_help(message):
-    send_welcome(message)
+        logger.error(f"Ошибка в send_welcome: {e}")
 
 @bot.message_handler(func=lambda message: message.text == '📝 Задать вопрос')
 def handle_ask_question(message):
     try:
         logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
-        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос (например: 'Что такое фотосинтез?'):", reply_markup=None)
+        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
         bot.register_next_step_handler(msg, process_text_question)
     except Exception as e:
-        logger.error(f"Ошибка в handle_ask_question: {str(e)}")
+        logger.error(f"Ошибка в handle_ask_question: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
-
-@bot.message_handler(func=lambda message: message.text == '📷 Отправить фото')
-def handle_ask_photo(message):
-    try:
-        logger.info(f"Запрос на отправку фото от {message.chat.id}")
-        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:\n• Сфокусируйтесь на тексте\n• Обеспечьте хорошее освещение\n• Держите камеру параллельно тексту", reply_markup=None)
-    except Exception as e:
-        logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
-
-def process_text_question(message):
-    try:
-        chat_id = message.chat.id
-        question = message.text
-        logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
-
-        if len(question) < 3:
-            bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
-            return
-
-        # Удаляем клавиатуру на время обработки
-        bot.send_chat_action(chat_id, 'typing')
-
-        # Сначала пытаемся получить ответ от ИИ
-        ai_response = get_ai_answer(question, "Ответь на основе своих знаний.")
-        
-        if ai_response:
-            # Возвращаем точный ответ от ИИ
-            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_response['answer']}\n"
-            response_text += f"<i>Уверенность: {ai_response['confidence']:.2f}</i>"
-        else:
-            # Если ИИ не дал ответа, ищем в Wikipedia
-            logger.info("ИИ не дал ответа, пробуем Wikipedia...")
-            wiki_results = search_wikipedia(question)
-            
-            if wiki_results and len(wiki_results) > 0:
-                # Берем лучший результат как контекст для ИИ
-                best_result = wiki_results[0]
-                context = best_result['snippet']
-                title = best_result['title']
-                url = best_result['url']
-                
-                # Пытаемся получить точный ответ через ИИ с контекстом
-                ai_response_with_context = get_ai_answer(question, context)
-                
-                if ai_response_with_context:
-                    # Возвращаем точный ответ от ИИ с контекстом
-                    response_text = f"🤖 <b>Ответ от ИИ (на основе Wikipedia):</b>\n{ai_response_with_context['answer']}\n"
-                    response_text += f"<i>Уверенность: {ai_response_with_context['confidence']:.2f}</i>\n\n"
-                    response_text += f"<b>Источник:</b> {title}\n"
-                    if url != "#" and url:
-                        response_text += f"<a href='{url}'>🔗 Подробнее</a>"
-                else:
-                    # Если ИИ не дал точного ответа, возвращаем обычный результат Wikipedia
-                    response_text = "🔍 <b>Найденная информация (Wikipedia):</b>\n"
-                    response_text += f"<i>{context}</i>\n\n"
-                    response_text += f"<b>Источник:</b> {title}\n"
-                    if url != "#" and url:
-                        response_text += f"<a href='{url}'>🔗 Подробнее</a>"
-            else:
-                response_text = "❌ Не удалось найти информацию по вашему запросу."
-
-        # Сохраняем в историю
-        save_history(chat_id, question, response_text)
-
-        bot.send_message(
-            chat_id=chat_id,
-            text=response_text,
-            parse_mode='HTML',
-            disable_web_page_preview=True,
-            reply_markup=create_menu()
-        )
-        logger.info("Ответ на текстовый вопрос отправлен")
-
-    except Exception as e:
-        logger.error(f"Ошибка в process_text_question: {str(e)}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
-
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    try:
-        chat_id = message.chat.id
-        logger.info(f"Получено фото от {chat_id}")
-        # Получаем фото с наилучшим качеством
-        file_id = message.photo[-1].file_id
-        file_info = bot.get_file(file_id)
-        file_data = bot.download_file(file_info.file_path)
-        bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
-        bot.send_chat_action(chat_id, 'typing')
-        # Распознаем текст
-        start_time = time.time()
-        text = process_image(file_data)
-        elapsed_time = time.time() - start_time
-        logger.info(f"OCR занял {elapsed_time:.2f} секунд")
-        if not text or len(text) < 10:
-            bot.send_message(
-                chat_id, 
-                "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
-                reply_markup=create_menu()
-            )
-            return
-        # Обрезаем длинный текст для отображения
-        display_text = text[:300] + "..." if len(text) > 300 else text
-        bot.send_message(
-            chat_id,
-            f"📝 Распознанный текст:\n<code>{display_text}</code>",
-            parse_mode='HTML',
-            reply_markup=create_menu()
-        )
-        # Ищем ответ по распознанному тексту
-        bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст...")
-        
-        # Сначала пытаемся получить ответ от ИИ по распознанному тексту
-        ai_response = get_ai_answer("Объясни содержание следующего текста: " + text[:200] + "...", "Ответь на основе текста.")
-        
-        if ai_response:
-            # Возвращаем точный ответ от ИИ
-            response_text = f"🤖 <b>Ответ от ИИ (по тексту):</b>\n{ai_response['answer']}\n"
-            response_text += f"<i>Уверенность: {ai_response['confidence']:.2f}</i>"
-        else:
-            # Если ИИ не дал ответа, ищем в Wikipedia
-            logger.info("ИИ не дал ответа по фото, пробуем Wikipedia...")
-            wiki_results = search_wikipedia(text[:100])  # Ищем по началу текста
-            
-            if wiki_results and len(wiki_results) > 0:
-                # Берем лучший результат как контекст для ИИ
-                best_result = wiki_results[0]
-                context = best_result['snippet']
-                title = best_result['title']
-                url = best_result['url']
-                
-                # Пытаемся получить точный ответ через ИИ с контекстом
-                ai_response_with_context = get_ai_answer("Объясни содержание следующего текста: " + text[:100] + "...", context)
-                
-                if ai_response_with_context:
-                    # Возвращаем точный ответ от ИИ с контекстом
-                    response_text = f"🤖 <b>Ответ от ИИ (на основе Wikipedia):</b>\n{ai_response_with_context['answer']}\n"
-                    response_text += f"<i>Уверенность: {ai_response_with_context['confidence']:.2f}</i>\n\n"
-                    response_text += f"<b>Источник:</b> {title}\n"
-                    if url != "#" and url:
-                        response_text += f"<a href='{url}'>🔗 Подробнее</a>"
-                else:
-                    # Если ИИ не дал точного ответа, возвращаем обычный результат Wikipedia
-                    response_text = "🔍 <b>Найденная информация (Wikipedia):</b>\n"
-                    response_text += f"<i>{context}</i>\n\n"
-                    response_text += f"<b>Источник:</b> {title}\n"
-                    if url != "#" and url:
-                        response_text += f"<a href='{url}'>🔗 Подробнее</a>"
-            else:
-                response_text = "❌ Не удалось найти информацию по распознанному тексту."
-
-        # Сохраняем в историю
-        save_history(chat_id, f"Фото: {text[:50]}...", response_text)
-
-        bot.send_message(
-            chat_id=chat_id,
-            text=response_text,
-            parse_mode='HTML',
-            disable_web_page_preview=True,
-            reply_markup=create_menu()
-        )
-        logger.info("Ответ по фото отправлен")
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
 
 @bot.message_handler(func=lambda message: message.text == '📚 История')
 def handle_history(message):
@@ -445,27 +100,68 @@ def handle_history(message):
         history = user_history[chat_id]
         response = "📚 Ваша история запросов:\n\n"
         for i, item in enumerate(reversed(history), 1):
-            # Обрезаем длинные вопросы
-            question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
-            response += f"<b>{i}. Вопрос:</b> {question}\n"
-            # Показываем первый результат из ответа
-            first_result = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
-            response += f"<b>Ответ:</b> {first_result}\n"
-            response += "─" * 20 + "\n"
+            question = item['question'][:50] + "..." if len(item['question']) > 50 else item['question']
+            response += f"{i}. <b>Вопрос:</b> {question}\n"
+            # Показываем начало ответа
+            answer_preview = item['response'][:100] + "..." if len(item['response']) > 100 else item['response']
+            response += f"   <b>Ответ:</b> {answer_preview}\n\n"
+        bot.send_message(chat_id, response, parse_mode='HTML', reply_markup=create_menu())
+        logger.info("История отправлена")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_history: {e}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
+
+def process_text_question(message):
+    try:
+        chat_id = message.chat.id
+        question = message.text
+        logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
+
+        if len(question) < 3:
+            bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
+            return
+
+        # Уведомляем пользователя, что бот думает
+        bot.send_chat_action(chat_id, 'typing')
+        status_msg = bot.send_message(chat_id, "⏳ Думаю...")
+
+        # Получаем ответ от DeepSeek
+        answer = query_deepseek_api(question)
+        
+        # Обновляем сообщение со статусом
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg.message_id,
+            text=f"✅ Ответ получен!"
+        )
+        
+        # Формируем и отправляем ответ
+        response_text = f"<b>Вопрос:</b> {question}\n\n<b>Ответ:</b> {answer}"
         bot.send_message(
-            chat_id,
-            response,
+            chat_id=chat_id,
+            text=response_text,
             parse_mode='HTML',
             reply_markup=create_menu()
         )
-        logger.info("История отправлена")
+        
+        # Сохраняем в историю
+        save_history(chat_id, question, answer)
+        logger.info("Ответ на текстовый вопрос отправлен")
+
     except Exception as e:
-        logger.error(f"Ошибка в handle_history: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
+        logger.error(f"Ошибка в process_text_question: {e}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
+
+# Обрабатываем любые текстовые сообщения как вопросы
+@bot.message_handler(content_types=['text'])
+def handle_any_text(message):
+    # Если это не команда и не кнопка меню, обрабатываем как вопрос
+    if not message.text.startswith('/') and message.text not in ['📝 Задать вопрос', '📚 История']:
+        process_text_question(message)
 
 @app.route('/')
 def home():
-    return "🤖 Telegram Study Bot активен! Используйте /start в Telegram"
+    return "🤖 Telegram AI Bot активен! Используйте /start в Telegram"
 
 @app.route('/health')
 def health_check():
@@ -483,55 +179,50 @@ def webhook():
             return '', 200
         return 'Bad request', 400
     except Exception as e:
-        logger.error(f"Ошибка в webhook: {str(e)}")
+        logger.error(f"Ошибка в webhook: {e}")
         return 'Server error', 500
 
 def configure_webhook():
     """Настраивает вебхук при запуске приложения"""
     try:
-        # Для Render.com
         if os.environ.get('RENDER'):
             external_url = os.environ.get('RENDER_EXTERNAL_URL')
             if external_url:
                 webhook_url = f"{external_url}/webhook"
-                # Проверка доступности бота
                 try:
                     bot.get_me()
                     logger.info("Бот доступен, устанавливаем вебхук")
                 except Exception as e:
-                    logger.error(f"Ошибка доступа к боту: {str(e)}")
+                    logger.error(f"Ошибка доступа к боту: {e}")
                     return
-                # Удаляем существующий вебхук перед установкой нового
                 bot.remove_webhook()
                 logger.info("Старый вебхук удален")
-                # Устанавливаем новый вебхук в фоновом потоке
+                
                 def set_webhook_background():
-                    import time
                     time.sleep(3)
                     try:
                         bot.set_webhook(url=webhook_url)
                         logger.info(f"Вебхук установлен: {webhook_url}")
-                        # Проверяем информацию о вебхуке
                         webhook_info = bot.get_webhook_info()
                         logger.info(f"Информация о вебхуке: {webhook_info}")
                     except Exception as e:
-                        logger.error(f"Ошибка установки вебхука: {str(e)}")
+                        logger.error(f"Ошибка установки вебхука: {e}")
+                
                 thread = threading.Thread(target=set_webhook_background)
                 thread.daemon = True
                 thread.start()
                 return
             else:
                 logger.warning("RENDER_EXTERNAL_URL не найден!")
-        # Для других платформ/локального запуска
         bot.remove_webhook()
         logger.info("Вебхук удален, используется polling")
     except Exception as e:
-        logger.error(f"Ошибка настройки вебхука: {str(e)}")
+        logger.error(f"Ошибка настройки вебхука: {e}")
 
-# Установка вебхука после определения всех обработчиков
+# Установка вебхука
 configure_webhook()
 
-# Для Docker - запускаем Flask приложение
+# Для Docker - запуск Flask приложения
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"Запуск Flask приложения на порту {port}")
