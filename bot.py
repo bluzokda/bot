@@ -64,10 +64,70 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_duckduckgo_html(query):
-    """Поиск через DuckDuckGo HTML (обход API)"""
+def search_deepseek(query):
+    """Поиск через DeepSeek (основной метод)"""
     try:
-        logger.info(f"Поиск в DuckDuckGo HTML: {query}")
+        logger.info(f"Поиск в DeepSeek: {query}")
+        encoded_query = quote_plus(query)
+        url = f"https://www.deepseek.com/search?q={encoded_query}&language=ru"
+        
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            
+            # Ищем результаты поиска (адаптируем селекторы под DeepSeek)
+            # Пробуем разные возможные селекторы
+            search_results = soup.find_all('div', {'data-selenium-generic': 'searchResultItem'})[:5]
+            
+            if not search_results:
+                # Альтернативные селекторы
+                search_results = soup.find_all('div', class_='search-result')[:5]
+            
+            if not search_results:
+                # Еще один вариант
+                search_results = soup.find_all('div', class_='result')[:5]
+            
+            for result in search_results:
+                try:
+                    # Ищем заголовок
+                    title_elem = result.find('h3') or result.find('h2') or result.find('h1')
+                    if not title_elem:
+                        continue
+                        
+                    title = title_elem.get_text(strip=True)
+                    
+                    # Ищем описание
+                    desc_elem = result.find('p') or result.find('div', class_='description') or result.find('div', class_='snippet')
+                    snippet = desc_elem.get_text(strip=True) if desc_elem else "Описание отсутствует"
+                    
+                    # Ищем ссылку
+                    link_elem = result.find('a', href=True)
+                    url = link_elem['href'] if link_elem else "#"
+                    
+                    if title and snippet:
+                        results.append({
+                            "title": title[:150],
+                            "url": url,
+                            "snippet": snippet[:300]
+                        })
+                except Exception as e:
+                    continue
+            
+            if results:
+                logger.info(f"Найдено в DeepSeek: {len(results)} результатов")
+                return results
+                
+        else:
+            logger.warning(f"DeepSeek вернул статус {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка поиска в DeepSeek: {str(e)}")
+    return None
+
+def search_duckduckgo_html(query):
+    """Поиск через DuckDuckGo HTML (резервный метод)"""
+    try:
+        logger.info(f"Поиск в DuckDuckGo HTML (резерв): {query}")
         encoded_query = quote_plus(query)
         url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=ru-ru"
         
@@ -105,56 +165,23 @@ def search_duckduckgo_html(query):
         logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
     return None
 
-def search_brave(query):
-    """Запасной поиск через Brave Search API"""
-    try:
-        logger.info(f"Поиск в Brave (резерв): {query}")
-        encoded_query = quote_plus(query)
-        url = f"https://api.search.brave.com/res/v1/web/search?q={encoded_query}&count=3&search_lang=ru"
-        
-        # Используем публичный токен
-        brave_headers = HEADERS.copy()
-        brave_headers["X-Subscription-Token"] = "BSAkvgKRhAoFTHCWyQqMqNwN8gkf4QDN"
-        
-        response = requests.get(url, headers=brave_headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            web_results = data.get("web", {}).get("results", [])
-            
-            for item in web_results[:3]:
-                results.append({
-                    "title": item.get("title", "Без названия")[:150],
-                    "url": item.get("url", "#"),
-                    "snippet": item.get("description", "Описание отсутствует")[:300]
-                })
-            
-            if results:
-                logger.info(f"Найдено в Brave: {len(results)} результатов")
-                return results
-        else:
-            logger.warning(f"Brave API вернул статус {response.status_code}")
-    except Exception as e:
-        logger.error(f"Ошибка поиска в Brave: {str(e)}")
-    return None
-
 def search_internet(query):
     """Ищет информацию по запросу через несколько источников"""
     try:
         logger.info(f"Поисковый запрос: {query}")
         
-        # Пробуем DuckDuckGo HTML (основной)
-        logger.info("Пробуем DuckDuckGo HTML...")
+        # Пробуем DeepSeek (основной)
+        logger.info("Пробуем DeepSeek...")
+        results = search_deepseek(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от DeepSeek")
+            return results
+            
+        # Если DeepSeek не сработал, пробуем DuckDuckGo HTML (резерв)
+        logger.info("DeepSeek не дал результатов, пробуем DuckDuckGo HTML...")
         results = search_duckduckgo_html(query)
         if results and len(results) > 0:
             logger.info("Успешно получены результаты от DuckDuckGo HTML")
-            return results
-            
-        # Если DuckDuckGo не сработал, пробуем Brave (резерв)
-        logger.info("DuckDuckGo HTML не дал результатов, пробуем Brave...")
-        results = search_brave(query)
-        if results and len(results) > 0:
-            logger.info("Успешно получены результаты от Brave")
             return results
             
         logger.warning("Не удалось получить результаты ни от одного источника")
@@ -205,7 +232,7 @@ def process_image(image_data):
         image = enhancer.enhance(3.0)
         # Легкое размытие для уменьшения шума
         image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        # Бинаризация (адаптивное пороговое преобразование)
+        # Бинаризация
         image = ImageOps.autocontrast(image)
         image = image.point(lambda p: 255 if p > 160 else 0)
         # Масштабирование для мелкого текста
