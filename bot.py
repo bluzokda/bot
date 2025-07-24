@@ -11,8 +11,7 @@ import threading
 import re
 import time
 import json
-from transformers import pipeline
-import torch
+from urllib.parse import quote_plus
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,25 +23,12 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-HF_TOKEN = os.environ.get('HF_TOKEN')  # Добавляем токен Hugging Face
-
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
-
-# Инициализация модели вопрос-ответ (загружается один раз при запуске)
-logger.info("Загрузка модели Hugging Face...")
-try:
-    qa_pipeline = pipeline("question-answering", 
-                          model="deepset/roberta-base-squad2",
-                          tokenizer="deepset/roberta-base-squad2")
-    logger.info("Модель Hugging Face загружена успешно")
-except Exception as e:
-    logger.error(f"Ошибка загрузки модели: {str(e)}")
-    qa_pipeline = None
 
 # Проверка доступности Tesseract
 try:
@@ -52,11 +38,18 @@ except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
 
-# Настройки поиска
+# Улучшенные заголовки для обхода блокировок
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0"
 }
 
 # Хранение истории
@@ -70,101 +63,107 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_internet(query):
-    """Ищет информацию по запросу через DuckDuckGo API"""
+def search_brave(query):
+    """Поиск через Brave Search (альтернатива DuckDuckGo)"""
     try:
-        logger.info(f"Поисковый запрос: {query}")
-        # Форматируем запрос для API
-        formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
-        url = f"https://api.duckduckgo.com/?q={formatted_query}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
+        logger.info(f"Поиск в Brave: {query}")
+        encoded_query = quote_plus(query)
+        url = f"https://api.search.brave.com/res/v1/web/search?q={encoded_query}&count=5&search_lang=ru"
+        
+        brave_headers = HEADERS.copy()
+        brave_headers["X-Subscription-Token"] = "BSAkvgKRhAoFTHCWyQqMqNwN8gkf4QDN"  # Публичный ключ
+        
+        response = requests.get(url, headers=brave_headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            web_results = data.get("web", {}).get("results", [])
+            
+            for item in web_results[:5]:
+                results.append({
+                    "title": item.get("title", "Без названия"),
+                    "url": item.get("url", "#"),
+                    "snippet": item.get("description", "Описание отсутствует")
+                })
+            
+            if results:
+                logger.info(f"Найдено в Brave: {len(results)} результатов")
+                return results
+        else:
+            logger.warning(f"Brave API вернул статус {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка поиска в Brave: {str(e)}")
+    return None
+
+def search_duckduckgo_html(query):
+    """Поиск через DuckDuckGo HTML (обход API)"""
+    try:
+        logger.info(f"Поиск в DuckDuckGo HTML: {query}")
+        encoded_query = quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=ru-ru"
+        
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
-        data = response.json()
+        
+        # Простой парсинг HTML (в идеале использовать BeautifulSoup)
+        html_content = response.text
         results = []
-        # Основной результат
-        if data.get("AbstractText"):
-            results.append({
-                "title": data.get("Heading", "Основной результат"),
-                "url": data.get("AbstractURL", "#"),
-                "snippet": data.get("AbstractText", "Описание отсутствует")
-            })
-        # Похожие темы
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if "FirstURL" in topic and "Text" in topic:
+        
+        # Ищем результаты в HTML
+        import re
+        # Находим заголовки результатов
+        title_matches = re.findall(r'<a[^>]*class="result__a"[^>]*>([^<]*)</a>', html_content)
+        url_matches = re.findall(r'<a[^>]*class="result__a"[^>]*href="([^"]*)"', html_content)
+        snippet_matches = re.findall(r'<a[^>]*class="result__snippet"[^>]*>([^<]*)', html_content)
+        
+        for i in range(min(5, len(title_matches))):
+            title = title_matches[i] if i < len(title_matches) else "Без названия"
+            url = url_matches[i] if i < len(url_matches) else "#"
+            snippet = snippet_matches[i] if i < len(snippet_matches) else "Описание отсутствует"
+            
+            if title and snippet:
                 results.append({
-                    "title": topic["Text"].split(" — ")[0],
-                    "url": topic["FirstURL"],
-                    "snippet": topic["Text"]
+                    "title": title.strip(),
+                    "url": url.strip(),
+                    "snippet": snippet.strip()
                 })
-        # Результаты из внешних источников
-        for result in data.get("Results", [])[:5]:
-            results.append({
-                "title": result.get("Text", "Без названия"),
-                "url": result.get("FirstURL", "#"),
-                "snippet": result.get("Text", "Описание отсутствует")
-            })
-        logger.info(f"Найдено результатов: {len(results)}")
-        return results if results else None
-    except Exception as e:
-        logger.error(f"Ошибка поиска: {str(e)}")
-        return None
-
-def search_with_ai(question):
-    """Ищет информацию и использует ИИ для точного ответа"""
-    try:
-        logger.info(f"Поиск с ИИ для вопроса: {question}")
         
-        # Сначала ищем контекст через интернет
-        search_results = search_internet(question)
-        if not search_results:
-            return "❌ Не удалось найти информацию по вашему запросу"
-        
-        # Берем лучший результат как контекст
-        best_result = search_results[0]
-        context = best_result['snippet']
-        title = best_result['title']
-        
-        # Если модель загружена, используем ИИ для точного ответа
-        if qa_pipeline:
-            try:
-                # Используем ИИ для извлечения точного ответа
-                result = qa_pipeline(question=question, context=context)
-                
-                if result['score'] > 0.1:  # Минимальный порог уверенности
-                    ai_answer = result['answer']
-                    confidence = result['score']
-                    response = f"🤖 <b>Точный ответ:</b> {ai_answer}\n"
-                    response += f"<i>Уверенность: {confidence:.2f}</i>\n\n"
-                    response += f"<b>Источник:</b> {title}\n"
-                    if best_result['url'] != "#":
-                        response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-                    return response
-                else:
-                    # Если ИИ не уверен, возвращаем оригинальный результат
-                    response = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
-                    response += f"<b>Источник:</b> {title}\n"
-                    if best_result['url'] != "#":
-                        response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-                    return response
-            except Exception as ai_error:
-                logger.error(f"Ошибка ИИ: {str(ai_error)}")
-                # fallback к обычному результату поиска
-                response = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
-                response += f"<b>Источник:</b> {title}\n"
-                if best_result['url'] != "#":
-                    response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-                return response
-        else:
-            # Если модель не загружена, возвращаем обычный результат
-            response = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
-            response += f"<b>Источник:</b> {title}\n"
-            if best_result['url'] != "#":
-                response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
-            return response
+        if results:
+            logger.info(f"Найдено в DuckDuckGo HTML: {len(results)} результатов")
+            return results
             
     except Exception as e:
-        logger.error(f"Ошибка поиска с ИИ: {str(e)}")
-        return "❌ Произошла ошибка при поиске информации"
+        logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
+    return None
+
+def search_internet(query):
+    """Ищет информацию по запросу через несколько источников"""
+    try:
+        logger.info(f"Поисковый запрос: {query}")
+        
+        # Пробуем разные источники по очереди
+        sources = [
+            ("Brave", search_brave),
+            ("DuckDuckGo HTML", search_duckduckgo_html)
+        ]
+        
+        for source_name, search_func in sources:
+            try:
+                logger.info(f"Пробуем источник: {source_name}")
+                results = search_func(query)
+                if results and len(results) > 0:
+                    logger.info(f"Успешно получены результаты от {source_name}")
+                    return results
+            except Exception as e:
+                logger.error(f"Ошибка поиска в {source_name}: {str(e)}")
+                continue
+        
+        logger.warning("Не удалось получить результаты ни от одного источника")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Ошибка общего поиска: {str(e)}")
+        return None
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -224,7 +223,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
+            "• Искать ответы на текстовые вопросы\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -279,8 +278,26 @@ def process_text_question(message):
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
         
-        # Ищем ответ с использованием ИИ
-        response_text = search_with_ai(question)
+        # Ищем ответ
+        search_results = search_internet(question)
+        if not search_results:
+            bot.send_message(
+                chat_id, 
+                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
+                reply_markup=create_menu()
+            )
+            return
+        
+        response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
+        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            response_text += f"<b>{i}. {title}</b>\n"
+            response_text += f"<i>{res['snippet']}</i>\n"
+            if res['url'] != "#":
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
+            else:
+                response_text += "\n"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -289,7 +306,7 @@ def process_text_question(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=False,
+            disable_web_page_preview=True,  # Отключаем предпросмотр для лучшей стабильности
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
@@ -331,7 +348,25 @@ def handle_photo(message):
         )
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
-        response_text = search_with_ai(text)
+        search_results = search_internet(text)
+        if not search_results:
+            # Попробуем найти по ключевым словам
+            keywords = ' '.join(text.split()[:10])
+            search_results = search_internet(keywords)
+            if not search_results:
+                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
+                return
+        
+        response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
+        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            response_text += f"<b>{i}. {title}</b>\n"
+            response_text += f"<i>{res['snippet']}</i>\n"
+            if res['url'] != "#":
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
+            else:
+                response_text += "\n"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -340,7 +375,7 @@ def handle_photo(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=False,
+            disable_web_page_preview=True,  # Отключаем предпросмотр для лучшей стабильности
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
@@ -363,8 +398,8 @@ def handle_history(message):
             question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
             response += f"<b>{i}. Вопрос:</b> {question}\n"
             # Показываем первый результат из ответа
-            first_line = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
-            response += f"<b>Ответ:</b> {first_line}\n"
+            first_result = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
+            response += f"<b>Ответ:</b> {first_result}\n"
             response += "─" * 20 + "\n"
         bot.send_message(
             chat_id,
