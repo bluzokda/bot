@@ -1,6 +1,12 @@
 import logging
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, 
+    ContextTypes, 
+    MessageHandler, 
+    filters,
+    CommandHandler
+)
 import os
 import asyncio
 from PIL import Image
@@ -98,30 +104,48 @@ async def get_answer(question: str, context: str) -> str:
         logger.exception("HF request exception")
         return f"⚠️ Ошибка: {str(e)}"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик входящих сообщений"""
-    user_id = update.message.from_user.id
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик фото"""
+    user = update.effective_user
+    user_id = user.id if user else None
+    
+    if not user_id:
+        logger.warning("Не удалось определить user_id")
+        return
+        
     msg = update.message
     
-    # Обработка изображений
-    if msg.photo:
-        try:
-            await msg.reply_chat_action(action="typing")
-            photo_file = await msg.photo[-1].get_file()
-            image_bytes = await photo_file.download_as_bytearray()
+    try:
+        await msg.reply_chat_action(action="typing")
+        photo_file = await msg.photo[-1].get_file()
+        image_bytes = await photo_file.download_as_bytearray()
+        
+        text = await image_to_text(image_bytes)
+        
+        # Проверка результата распознавания
+        if "не удалось" in text.lower() or "ошибка" in text.lower() or len(text) < 10:
+            await msg.reply_text("⚠️ Не удалось распознать текст. Попробуйте другое изображение.")
+            return
             
-            text = await image_to_text(image_bytes)
-            
-            user_context[user_id] = text
-            response = f"✅ Текст распознан ({len(text)} символов)\nЗадайте вопрос по тексту"
-            await msg.reply_text(response)
-        except Exception as e:
-            logger.exception("Photo processing error")
-            await msg.reply_text("⚠️ Ошибка обработки изображения")
-        return
+        user_context[user_id] = text
+        logger.info(f"Saved context for user {user_id}: {text[:50]}...")
+        response = f"✅ Текст распознан ({len(text)} символов)\nТеперь вы можете задавать вопросы по этому тексту"
+        await msg.reply_text(response)
+    except Exception as e:
+        logger.exception("Photo processing error")
+        await msg.reply_text("⚠️ Ошибка обработки изображения")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений"""
+    user = update.effective_user
+    user_id = user.id if user else None
     
-    # Обработка текста
-    user_text = msg.text.strip()
+    if not user_id:
+        logger.warning("Не удалось определить user_id")
+        return
+        
+    msg = update.message
+    user_text = msg.text.strip() if msg.text else ""
     
     if not user_text:
         return
@@ -130,30 +154,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_text.lower() in ['/start', '/clear', '/new']:
         if user_id in user_context:
             del user_context[user_id]
+            logger.info(f"Context cleared for user {user_id}")
         await msg.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
+        return
+    
+    # Команда помощи
+    if user_text.lower() in ['/help', 'помощь']:
+        help_text = (
+            "🤖 *Помощь по боту*\n\n"
+            "Отправьте фото с текстом (тест, контрольная и т.д.), а затем задавайте вопросы по нему.\n\n"
+            "Команды:\n"
+            "/start, /new, /clear - очистить текущий контекст\n"
+            "/help - показать это сообщение\n\n"
+            "После отправки фото задавайте вопросы по тексту, например:\n"
+            "• Какой ответ на вопрос 5?\n"
+            "• Решение задачи 3\n"
+            "• Что написано в пункте 2.1?"
+        )
+        await msg.reply_text(help_text)
         return
     
     # Проверка контекста
     if user_id not in user_context:
-        await msg.reply_text("ℹ️ Сначала отправьте изображение с текстом")
+        logger.warning(f"Context not found for user {user_id}")
+        await msg.reply_text(
+            "ℹ️ Сначала отправьте изображение с текстом\n"
+            "После этого вы сможете задавать вопросы по его содержанию."
+        )
         return
     
-    # Получение ответа
+    # Получение контекста и ответа
+    context_text = user_context.get(user_id, "")
+    if not context_text:
+        await msg.reply_text("⚠️ Контекст пуст. Отправьте новое изображение.")
+        return
+        
     await msg.reply_chat_action(action="typing")
-    context_text = user_context[user_id]
-    status_msg = await msg.reply_text("🔍 Анализирую вопрос...")
+    status_msg = await msg.reply_text("🔍 Ищу ответ на ваш вопрос...")
     
     try:
         answer = await get_answer(user_text, context_text)
         
         # Форматирование ответа
-        response = f"❓ Вопрос: {user_text}\n\n💡 Ответ: {answer}\n\n"
+        response = f"❓ *Вопрос:* {user_text}\n\n💡 *Ответ:* {answer}\n\n"
         response += "Для нового запроса отправьте /new"
         
-        await status_msg.edit_text(response)
+        await status_msg.edit_text(response, parse_mode="Markdown")
     except Exception as e:
         logger.exception("Error processing question")
         await status_msg.edit_text("⚠️ Произошла ошибка при обработке вашего вопроса")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Привет, {user.first_name}!\n\n"
+        "Отправьте фото с текстом (тест, контрольная и т.д.), "
+        "а затем задавайте вопросы по его содержанию.\n\n"
+        "Используйте /help для получения дополнительной информации."
+    )
 
 def main() -> None:
     """Запуск бота"""
@@ -161,11 +220,23 @@ def main() -> None:
     if not token:
         raise ValueError("Токен Telegram не найден!")
     
-    # Путь к Tesseract (уже настроен в Dockerfile)
+    # Путь к Tesseract
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
     
     application = Application.builder().token(token).build()
-    application.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
+    
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", handle_text))
+    application.add_handler(CommandHandler("new", handle_text))
+    application.add_handler(CommandHandler("clear", handle_text))
+    
+    # Обработчики по типу контента
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    # Обработчик для команд в тексте
+    application.add_handler(MessageHandler(filters.COMMAND, handle_text))
     
     logger.info("Бот запущен")
     application.run_polling()
