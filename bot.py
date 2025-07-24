@@ -12,6 +12,7 @@ import re
 import time
 import json
 from urllib.parse import quote_plus
+from bs4 import BeautifulSoup
 
 # Настройка логирования
 logging.basicConfig(
@@ -63,10 +64,51 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_brave(query):
-    """Поиск через Brave Search API (основной метод)"""
+def search_duckduckgo_html(query):
+    """Поиск через DuckDuckGo HTML (обход API)"""
     try:
-        logger.info(f"Поиск в Brave: {query}")
+        logger.info(f"Поиск в DuckDuckGo HTML: {query}")
+        encoded_query = quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=ru-ru"
+        
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+        
+        # Ищем результаты
+        result_divs = soup.find_all('div', class_='result')[:5]
+        for div in result_divs:
+            try:
+                title_elem = div.find('a', class_='result__a')
+                if title_elem:
+                    title = title_elem.get_text(strip=True)[:150]
+                    url = title_elem.get('href', '#')
+                    snippet_elem = div.find('a', class_='result__snippet')
+                    snippet = snippet_elem.get_text(strip=True)[:300] if snippet_elem else "Описание отсутствует"
+                    
+                    if title and snippet:
+                        results.append({
+                            "title": title,
+                            "url": url,
+                            "snippet": snippet
+                        })
+            except:
+                continue
+        
+        if results:
+            logger.info(f"Найдено в DuckDuckGo HTML: {len(results)} результатов")
+            return results
+            
+    except Exception as e:
+        logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
+    return None
+
+def search_brave(query):
+    """Запасной поиск через Brave Search API"""
+    try:
+        logger.info(f"Поиск в Brave (резерв): {query}")
         encoded_query = quote_plus(query)
         url = f"https://api.search.brave.com/res/v1/web/search?q={encoded_query}&count=3&search_lang=ru"
         
@@ -96,58 +138,23 @@ def search_brave(query):
         logger.error(f"Ошибка поиска в Brave: {str(e)}")
     return None
 
-def search_searx(query):
-    """Запасной поиск через Searx (если Brave не работает)"""
-    try:
-        logger.info(f"Поиск в Searx (резерв): {query}")
-        encoded_query = quote_plus(query)
-        # Используем публичный экземпляр Searx
-        url = f"https://searx.be/search?q={encoded_query}&categories=general&language=ru&format=json"
-        
-        searx_headers = HEADERS.copy()
-        searx_headers["Accept"] = "application/json"
-        
-        response = requests.get(url, headers=searx_headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            search_results = data.get("results", [])
-            
-            for item in search_results[:3]:
-                # Проверяем, что результат содержит нужные поля
-                if "title" in item and "content" in item:
-                    results.append({
-                        "title": item.get("title", "Без названия")[:150],
-                        "url": item.get("url", "#"),
-                        "snippet": item.get("content", "Описание отсутствует")[:300]
-                    })
-            
-            if results:
-                logger.info(f"Найдено в Searx: {len(results)} результатов")
-                return results
-        else:
-            logger.warning(f"Searx вернул статус {response.status_code}")
-    except Exception as e:
-        logger.error(f"Ошибка поиска в Searx: {str(e)}")
-    return None
-
 def search_internet(query):
     """Ищет информацию по запросу через несколько источников"""
     try:
         logger.info(f"Поисковый запрос: {query}")
         
-        # Пробуем Brave Search (основной)
-        logger.info("Пробуем Brave Search...")
-        results = search_brave(query)
+        # Пробуем DuckDuckGo HTML (основной)
+        logger.info("Пробуем DuckDuckGo HTML...")
+        results = search_duckduckgo_html(query)
         if results and len(results) > 0:
-            logger.info("Успешно получены результаты от Brave Search")
+            logger.info("Успешно получены результаты от DuckDuckGo HTML")
             return results
             
-        # Если Brave не сработал, пробуем Searx (резерв)
-        logger.info("Brave Search не дал результатов, пробуем Searx...")
-        results = search_searx(query)
+        # Если DuckDuckGo не сработал, пробуем Brave (резерв)
+        logger.info("DuckDuckGo HTML не дал результатов, пробуем Brave...")
+        results = search_brave(query)
         if results and len(results) > 0:
-            logger.info("Успешно получены результаты от Searx")
+            logger.info("Успешно получены результаты от Brave")
             return results
             
         logger.warning("Не удалось получить результаты ни от одного источника")
@@ -198,7 +205,7 @@ def process_image(image_data):
         image = enhancer.enhance(3.0)
         # Легкое размытие для уменьшения шума
         image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        # Бинаризация
+        # Бинаризация (адаптивное пороговое преобразование)
         image = ImageOps.autocontrast(image)
         image = image.point(lambda p: 255 if p > 160 else 0)
         # Масштабирование для мелкого текста
