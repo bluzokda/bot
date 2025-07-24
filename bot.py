@@ -27,19 +27,7 @@ OCR_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
 user_context = {}
 executor = ThreadPoolExecutor(max_workers=4)
 
-async def image_to_text(image_bytes: bytes) -> str:
-    """Конвертирует изображение в текст с помощью Tesseract OCR"""
-    try:
-        loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(
-            executor,
-            lambda: self._sync_image_to_text(image_bytes)
-        return text
-    except Exception as e:
-        logger.error(f"OCR error: {e}")
-        return "Ошибка обработки изображения."
-
-def _sync_image_to_text(self, image_bytes: bytes) -> str:
+def sync_image_to_text(image_bytes: bytes) -> str:
     """Синхронная обработка изображения"""
     try:
         image = Image.open(io.BytesIO(image_bytes))
@@ -62,6 +50,20 @@ def _sync_image_to_text(self, image_bytes: bytes) -> str:
     except Exception as e:
         logger.exception("OCR error")
         return "Ошибка обработки изображения"
+
+async def image_to_text(image_bytes: bytes) -> str:
+    """Конвертирует изображение в текст с помощью Tesseract OCR"""
+    try:
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(
+            executor,
+            sync_image_to_text,
+            image_bytes
+        )
+        return text
+    except Exception as e:
+        logger.error(f"OCR error: {e}")
+        return "Ошибка обработки изображения."
 
 async def get_answer(question: str, context: str) -> str:
     """Получение ответа через Hugging Face API"""
