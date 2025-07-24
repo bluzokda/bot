@@ -23,7 +23,7 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY') # Получаем ключ из переменных окружения
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
@@ -54,14 +54,13 @@ HEADERS = {
     "Cache-Control": "max-age=0"
 }
 
-# Настройки OpenRouter
+# OpenRouter API настройки
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "HTTP-Referer": os.environ.get('RENDER_EXTERNAL_URL', 'https://your-bot-url.onrender.com'), # Замени на свой URL если нужно
+    "HTTP-Referer": os.environ.get('RENDER_EXTERNAL_URL', 'https://your-bot.onrender.com'),
     "X-Title": "StudyBot",
     "Content-Type": "application/json"
 }
-
 
 # Хранение истории
 user_history = {}
@@ -74,148 +73,226 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-# --- ФУНКЦИИ ПОИСКА (оставляем как есть, они работают как резерв) ---
 def search_brave(query):
     """Поиск через Brave Search API (основной метод)"""
-    # ... (оставь код search_brave как есть) ...
-    pass # Заглушка, замени на реальный код
+    try:
+        logger.info(f"Поиск в Brave: {query}")
+        encoded_query = quote_plus(query)
+        url = f"https://api.search.brave.com/res/v1/web/search?q={encoded_query}&count=3&search_lang=ru"
+        # Используем публичный токен
+        brave_headers = HEADERS.copy()
+        brave_headers["X-Subscription-Token"] = "BSAkvgKRhAoFTHCWyQqMqNwN8gkf4QDN"
+        response = requests.get(url, headers=brave_headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            web_results = data.get("web", {}).get("results", [])
+            for item in web_results[:3]:
+                results.append({
+                    "title": item.get("title", "Без названия")[:150],
+                    "url": item.get("url", "#"),
+                    "snippet": item.get("description", "Описание отсутствует")[:300]
+                })
+            if results:
+                logger.info(f"Найдено в Brave: {len(results)} результатов")
+                return results
+        else:
+            logger.warning(f"Brave API вернул статус {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка поиска в Brave: {str(e)}")
+    return None
 
 def search_searx(query):
     """Запасной поиск через Searx (если Brave не работает)"""
-    # ... (оставь код search_searx как есть) ...
-    pass # Заглушка, замени на реальный код
-
-# --- НОВАЯ ФУНКЦИЯ ПОИСКА С ИИ ---
-def search_internet_with_ai(query):
-    """Ищет информацию и использует ИИ для генерации ответа"""
     try:
-        logger.info(f"Обработка запроса с ИИ: {query}")
-
-        # 1. Попробуем получить информацию из интернета (резервные источники)
-        search_results = None
-        logger.info("Пробуем получить информацию из интернета...")
-        # Пробуем Brave Search (основной)
-        if 'search_brave' in globals():
-             results = search_brave(query)
-             if results and len(results) > 0:
-                 search_results = results
-                 logger.info("Успешно получены результаты от Brave Search")
-        # Если Brave не сработал, пробуем Searx (резерв)
-        if not search_results and 'search_searx' in globals():
-             results = search_searx(query)
-             if results and len(results) > 0:
-                 search_results = results
-                 logger.info("Успешно получены результаты от Searx")
-
-        # 2. Подготовим контекст для ИИ
-        context_text = ""
-        if search_results:
-             context_text = "\n\n".join([f"Источник: {res['title']}\n{res['snippet']}" for res in search_results[:3]])
-             logger.info(f"Контекст для ИИ подготовлен ({len(context_text)} символов)")
+        logger.info(f"Поиск в Searx (резерв): {query}")
+        encoded_query = quote_plus(query)
+        # Используем публичный экземпляр Searx
+        url = f"https://searx.be/search?q={encoded_query}&categories=general&language=ru&format=json"
+        searx_headers = HEADERS.copy()
+        searx_headers["Accept"] = "application/json"
+        response = requests.get(url, headers=searx_headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            search_results = data.get("results", [])
+            for item in search_results[:3]:
+                # Проверяем, что результат содержит нужные поля
+                if "title" in item and "content" in item:
+                    results.append({
+                        "title": item.get("title", "Без названия")[:150],
+                        "url": item.get("url", "#"),
+                        "snippet": item.get("content", "Описание отсутствует")[:300]
+                    })
+            if results:
+                logger.info(f"Найдено в Searx: {len(results)} результатов")
+                return results
         else:
-             logger.warning("Информация из интернета не найдена, отправляем запрос без контекста")
-             context_text = "Информация по запросу не найдена в интернете."
+            logger.warning(f"Searx вернул статус {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка поиска в Searx: {str(e)}")
+    return None
 
-        # 3. Отправим запрос в OpenRouter
-        if not OPENROUTER_API_KEY:
-             logger.error("OPENROUTER_API_KEY не установлен!")
-             # Если ключа нет, возвращаем результаты поиска напрямую или сообщение об ошибке
-             if search_results:
-                 return search_results
-             else:
-                 return [{"title": "Ошибка ИИ", "url": "#", "snippet": "Ключ OpenRouter не установлен. Не удалось получить ответ от ИИ."}]
+def get_ai_answer(question, context):
+    """Получает ответ от ИИ через OpenRouter"""
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY не установлен")
+        return None
 
-        logger.info("Отправка запроса в OpenRouter...")
+    try:
+        logger.info(f"Запрос к OpenRouter: {question}")
+        
+        # Формируем сообщения для чат-модели
+        messages = [
+            {
+                "role": "system",
+                "content": "Ты помощник по учебе. Отвечай четко и по делу на русском языке. Используй информацию из контекста для ответа. Если информации недостаточно, скажи об этом."
+            },
+            {
+                "role": "user",
+                "content": f"Контекст: {context}\n\nВопрос: {question}"
+            }
+        ]
 
         payload = {
-            "model": "openai/gpt-3.5-turbo", # Можешь выбрать другую модель, например, "mistralai/mistral-7b-instruct"
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты полезный помощник для студентов и школьников. "
-                        "Твоя задача - отвечать на вопросы, используя предоставленный контекст. "
-                        "Отвечай четко, по делу и на русском языке. "
-                        "Если контекст не содержит нужной информации, скажи об этом."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"Контекст:\n{context_text}\n\nВопрос: {query}"
-                }
-            ],
+            "model": "openai/gpt-3.5-turbo",  # Можно изменить на другую модель
+            "messages": messages,
             "temperature": 0.7,
             "max_tokens": 500
         }
 
-        try:
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=OPENROUTER_HEADERS,
-                json=payload,
-                timeout=30 # Увеличенный таймаут для ИИ
-            )
-            response.raise_for_status() # Проверка на HTTP ошибки
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=OPENROUTER_HEADERS,
+            json=payload,
+            timeout=30
+        )
 
+        logger.info(f"OpenRouter status: {response.status_code}")
+
+        if response.status_code == 200:
             data = response.json()
-            ai_answer = data['choices'][0]['message']['content'].strip()
-
-            logger.info(f"Ответ от OpenRouter получен ({len(ai_answer)} символов)")
-
-            # Создаем результат, имитирующий формат поиска
-            ai_result = {
-                "title": "🤖 Ответ от ИИ (на основе найденной информации)",
-                "url": "#",
-                "snippet": ai_answer
-            }
-
-            # Добавляем исходные результаты поиска, если они были
-            final_results = [ai_result]
-            if search_results:
-                final_results.extend(search_results[:2]) # Добавляем максимум 2 исходных результата
-
-            return final_results
-
-        except requests.exceptions.Timeout:
-            logger.error("Таймаут при запросе к OpenRouter")
-            error_result = {"title": "Ошибка ИИ", "url": "#", "snippet": "Таймаут: Запрос к ИИ занял слишком много времени. Попробуйте позже или переформулируйте вопрос."}
-            # Возвращаем ошибку ИИ + исходные результаты поиска, если есть
-            return [error_result] + (search_results[:3] if search_results else [])
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка сети при запросе к OpenRouter: {e}")
-            error_result = {"title": "Ошибка ИИ", "url": "#", "snippet": f"Ошибка сети: {str(e)}. Попробуйте позже."}
-            return [error_result] + (search_results[:3] if search_results else [])
-        except KeyError as e:
-            logger.error(f"Ошибка парсинга ответа от OpenRouter: {e}. Ответ: {data}")
-            error_result = {"title": "Ошибка ИИ", "url": "#", "snippet": "Ошибка обработки ответа от ИИ. Попробуйте позже."}
-            return [error_result] + (search_results[:3] if search_results else [])
-        except Exception as e:
-            logger.exception("Неожиданная ошибка при запросе к OpenRouter")
-            error_result = {"title": "Ошибка ИИ", "url": "#", "snippet": f"Неизвестная ошибка: {str(e)}. Попробуйте позже."}
-            return [error_result] + (search_results[:3] if search_results else [])
+            answer = data['choices'][0]['message']['content'].strip()
+            logger.info(f"Получен ответ от OpenRouter: {len(answer)} символов")
+            return answer
+        else:
+            logger.error(f"OpenRouter вернул статус {response.status_code}: {response.text}")
+            return None
 
     except Exception as e:
-        logger.exception("Ошибка в search_internet_with_ai")
-        # В случае критической ошибки в самой функции, пытаемся вернуть хотя бы результаты поиска
-        if 'search_results' in locals() and search_results:
-            search_results.insert(0, {"title": "Ошибка ИИ", "url": "#", "snippet": f"Не удалось обработать запрос ИИ: {str(e)}. Показаны результаты поиска."})
-            return search_results
-        else:
-            return [{"title": "Ошибка", "url": "#", "snippet": f"Произошла ошибка: {str(e)}"}]
+        logger.error(f"Ошибка запроса к OpenRouter: {str(e)}")
+        return None
 
+def search_internet(query):
+    """Ищет информацию по запросу через несколько источников"""
+    try:
+        logger.info(f"Поисковый запрос: {query}")
+        # Пробуем Brave Search (основной)
+        logger.info("Пробуем Brave Search...")
+        results = search_brave(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от Brave Search")
+            return results
+        # Если Brave не сработал, пробуем Searx (резерв)
+        logger.info("Brave Search не дал результатов, пробуем Searx...")
+        results = search_searx(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от Searx")
+            return results
+        logger.warning("Не удалось получить результаты ни от одного источника")
+        return [
+            {
+                "title": "Поиск не удался",
+                "url": "#",
+                "snippet": "К сожалению, не удалось найти информацию по вашему запросу. Попробуйте переформулировать вопрос или использовать другие ключевые слова."
+            }
+        ]
+    except Exception as e:
+        logger.error(f"Ошибка общего поиска: {str(e)}")
+        return [
+            {
+                "title": "Ошибка поиска",
+                "url": "#",
+                "snippet": "Произошла ошибка при поиске информации. Попробуйте повторить запрос позже."
+            }
+        ]
 
-# --- ФУНКЦИИ ОБРАБОТКИ ИЗОБРАЖЕНИЙ И СООБЩЕНИЙ (обновляем вызов search_internet) ---
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
-    # ... (оставь как есть) ...
+    if user_id not in user_history:
+        user_history[user_id] = []
+    # Сохраняем только последние 10 записей
+    if len(user_history[user_id]) >= 10:
+        user_history[user_id].pop(0)
+    user_history[user_id].append({
+        "question": question,
+        "response": response
+    })
 
 def process_image(image_data):
     """Распознает текст на изображении с улучшенной предобработкой"""
-    # ... (оставь как есть) ...
+    try:
+        image = Image.open(io.BytesIO(image_data))
+        # Конвертация в градации серого
+        if image.mode != 'L':
+            image = image.convert('L')
+        # Автоконтраст
+        image = ImageOps.autocontrast(image, cutoff=10)
+        # Увеличение контраста
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2.5)
+        # Увеличение резкости
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(3.0)
+        # Легкое размытие для уменьшения шума
+        image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
+        # Бинаризация
+        image = ImageOps.autocontrast(image)
+        image = image.point(lambda p: 255 if p > 160 else 0)
+        # Масштабирование для мелкого текста
+        if min(image.size) < 1000:
+            scale_factor = max(2500 / min(image.size), 2.5)
+            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
+            image = image.resize(new_size, Image.LANCZOS)
+        # Повышение резкости после масштабирования
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(2.0)
+        # Распознаем текст с оптимальными параметрами
+        custom_config = r'--oem 3 --psm 6 -l rus+eng'
+        text = pytesseract.image_to_string(image, config=custom_config)
+        # Очистка текста
+        text = re.sub(r'\s+', ' ', text).strip()
+        logger.info(f"Распознано символов: {len(text)}")
+        return text
+    except Exception as e:
+        logger.error(f"Ошибка OCR: {str(e)}")
+        return None
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    # ... (оставь как есть) ...
+    try:
+        logger.info(f"Обработка команды /start от {message.chat.id}")
+        response = (
+            "👋 Привет! Я твой бот-помощник для учебы!\n"
+            "Я умею:\n"
+            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
+            "• Распознавать текст с фотографий\n"
+            "• Помогать с учебными материалами\n"
+            "📌 Советы для лучшего результата:\n"
+            "1. Формулируйте вопросы четко (например: 'Что такое фотосинтез?')\n"
+            "2. Фотографируйте текст при хорошем освещении\n"
+            "3. Держите камеру параллельно тексту\n"
+            "4. Убедитесь, что текст занимает большую часть кадра\n"
+            "Попробуй отправить мне вопрос или фотографию с заданием!"
+        )
+        bot.send_message(
+            message.chat.id,
+            response,
+            reply_markup=create_menu()
+        )
+        logger.info("Приветственное сообщение отправлено")
+    except Exception as e:
+        logger.error(f"Ошибка в send_welcome: {str(e)}")
 
 @bot.message_handler(func=lambda message: message.text == 'ℹ️ Помощь')
 def handle_help(message):
@@ -223,14 +300,24 @@ def handle_help(message):
 
 @bot.message_handler(func=lambda message: message.text == '📝 Задать вопрос')
 def handle_ask_question(message):
-    # ... (оставь как есть) ...
+    try:
+        logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
+        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос (например: 'Что такое фотосинтез?'):", reply_markup=None)
+        bot.register_next_step_handler(msg, process_text_question)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_ask_question: {str(e)}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
 
 @bot.message_handler(func=lambda message: message.text == '📷 Отправить фото')
 def handle_ask_photo(message):
-    # ... (оставь как есть) ...
+    try:
+        logger.info(f"Запрос на отправку фото от {message.chat.id}")
+        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:\n• Сфокусируйтесь на тексте\n• Обеспечьте хорошее освещение\n• Держите камеру параллельно тексту", reply_markup=None)
+    except Exception as e:
+        logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
+        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
 
 def process_text_question(message):
-    """Обработчик текстовых вопросов с использованием ИИ"""
     try:
         chat_id = message.chat.id
         question = message.text
@@ -243,27 +330,38 @@ def process_text_question(message):
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
 
-        # Ищем ответ с помощью ИИ
-        search_results = search_internet_with_ai(question)
-
-        if not search_results or (len(search_results) == 1 and search_results[0]['title'] in ["Поиск не удался", "Ошибка"]):
+        # Ищем информацию
+        search_results = search_internet(question)
+        
+        if not search_results or search_results[0]['title'] == "Поиск не удался":
             bot.send_message(
-                chat_id,
-                "❌ Не удалось обработать ваш запрос. Попробуйте переформулировать вопрос.",
+                chat_id, 
+                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
                 reply_markup=create_menu()
             )
             return
 
-        response_text = "🔍 Результаты поиска:\n\n"
-        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#" and res['url']:
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
-            else:
-                response_text += "\n"
+        # Берем лучший результат как контекст
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
+        url = best_result['url']
+
+        # Пытаемся получить ответ от ИИ
+        ai_answer = get_ai_answer(question, context)
+        
+        if ai_answer:
+            # Возвращаем ответ от ИИ
+            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+        else:
+            # Если ИИ не ответил, возвращаем обычный результат
+            response_text = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
 
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -272,7 +370,7 @@ def process_text_question(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,  # Отключаем для стабильности
+            disable_web_page_preview=True,
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
@@ -281,40 +379,66 @@ def process_text_question(message):
         logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
 
-
-def process_photo_question(chat_id, text):
-    """Обработчик текста, распознанного с фото, с использованием ИИ"""
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
     try:
-        logger.info(f"Обработка текста с фото от {chat_id}: {text[:50]}...")
+        chat_id = message.chat.id
+        logger.info(f"Получено фото от {chat_id}")
+        # Получаем фото с наилучшим качеством
+        file_id = message.photo[-1].file_id
+        file_info = bot.get_file(file_id)
+        file_data = bot.download_file(file_info.file_path)
+        bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
+        bot.send_chat_action(chat_id, 'typing')
+        # Распознаем текст
+        start_time = time.time()
+        text = process_image(file_data)
+        elapsed_time = time.time() - start_time
+        logger.info(f"OCR занял {elapsed_time:.2f} секунд")
+        if not text or len(text) < 10:
+            bot.send_message(
+                chat_id,
+                "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
+                reply_markup=create_menu()
+            )
+            return
+        # Обрезаем длинный текст для отображения
+        display_text = text[:300] + "..." if len(text) > 300 else text
+        bot.send_message(
+            chat_id,
+            f"📝 Распознанный текст:\n<code>{display_text}</code>",
+            parse_mode='HTML',
+            reply_markup=create_menu()
+        )
+        # Ищем ответ по распознанному тексту
+        bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
+        search_results = search_internet(text)
 
-        if len(text) < 10:
-            bot.send_message(chat_id, "❌ Распознанный текст слишком короткий для поиска.", reply_markup=create_menu())
+        if not search_results or search_results[0]['title'] == "Поиск не удался":
+            bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
             return
 
-        # Удаляем клавиатуру на время обработки
-        bot.send_chat_action(chat_id, 'typing')
+        # Берем лучший результат как контекст
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
+        url = best_result['url']
 
-        # Ищем ответ с помощью ИИ, используя распознанный текст как запрос
-        search_results = search_internet_with_ai(text)
-
-        if not search_results or (len(search_results) == 1 and search_results[0]['title'] in ["Поиск не удался", "Ошибка"]):
-             bot.send_message(
-                 chat_id,
-                 "❌ Не удалось обработать запрос по распознанному тексту. Попробуйте другое изображение или задайте вопрос вручную.",
-                 reply_markup=create_menu()
-             )
-             return
-
-        response_text = "🔍 Результаты по распознанному тексту:\n\n"
-        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
-            # Укорачиваем слишком длинные заголовки
-            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
-            response_text += f"<b>{i}. {title}</b>\n"
-            response_text += f"<i>{res['snippet']}</i>\n"
-            if res['url'] != "#" and res['url']:
-                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
-            else:
-                response_text += "\n"
+        # Пытаемся получить ответ от ИИ
+        ai_answer = get_ai_answer(text[:100] + "...", context)  # Используем начало текста как вопрос
+        
+        if ai_answer:
+            # Возвращаем ответ от ИИ
+            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+        else:
+            # Если ИИ не ответил, возвращаем обычный результат
+            response_text = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+            response_text += f"<b>Источник:</b> {title}\n"
+            if url != "#" and url:
+                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
 
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -323,60 +447,42 @@ def process_photo_question(chat_id, text):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,  # Отключаем для стабильности
+            disable_web_page_preview=True,
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
-
     except Exception as e:
-        logger.error(f"Ошибка в process_photo_question: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке запроса по фото.", reply_markup=create_menu())
-
-
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-     """Обработчик фото: распознает текст и передает его в ИИ"""
-     try:
-         chat_id = message.chat.id
-         logger.info(f"Получено фото от {chat_id}")
-         # Получаем фото с наилучшим качеством
-         file_id = message.photo[-1].file_id
-         file_info = bot.get_file(file_id)
-         file_data = bot.download_file(file_info.file_path)
-         bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
-         bot.send_chat_action(chat_id, 'typing')
-         # Распознаем текст
-         start_time = time.time()
-         text = process_image(file_data)
-         elapsed_time = time.time() - start_time
-         logger.info(f"OCR занял {elapsed_time:.2f} секунд")
-         if not text or len(text) < 10:
-             bot.send_message(
-                 chat_id,
-                 "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
-                 reply_markup=create_menu()
-             )
-             return
-         # Обрезаем длинный текст для отображения
-         display_text = text[:300] + "..." if len(text) > 300 else text
-         bot.send_message(
-             chat_id,
-             f"📝 Распознанный текст:\n<code>{display_text}</code>",
-             parse_mode='HTML',
-             reply_markup=create_menu()
-         )
-         # Ищем ответ по распознанному тексту с помощью ИИ
-         bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст с помощью ИИ...")
-         process_photo_question(chat_id, text) # Вызываем новую функцию
-
-     except Exception as e:
-         logger.error(f"Ошибка обработки фото: {str(e)}")
-         bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
-
+        logger.error(f"Ошибка обработки фото: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
 
 @bot.message_handler(func=lambda message: message.text == '📚 История')
 def handle_history(message):
-    # ... (оставь как есть) ...
+    try:
+        chat_id = message.chat.id
+        logger.info(f"Обработка 'История' от {chat_id}")
+        if chat_id not in user_history or not user_history[chat_id]:
+            bot.send_message(chat_id, "📭 История запросов пуста.", reply_markup=create_menu())
+            return
+        history = user_history[chat_id]
+        response = "📚 Ваша история запросов:\n\n"
+        for i, item in enumerate(reversed(history), 1):
+            # Обрезаем длинные вопросы
+            question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
+            response += f"<b>{i}. Вопрос:</b> {question}\n"
+            # Показываем первый результат из ответа
+            first_result = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
+            response += f"<b>Ответ:</b> {first_result}\n"
+            response += "─" * 20 + "\n"
+        bot.send_message(
+            chat_id,
+            response,
+            parse_mode='HTML',
+            reply_markup=create_menu()
+        )
+        logger.info("История отправлена")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_history: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
 
 @app.route('/')
 def home():
@@ -389,10 +495,59 @@ def health_check():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # ... (оставь как есть) ...
+    try:
+        if request.headers.get('content-type') == 'application/json':
+            json_data = request.get_json()
+            logger.info("Получен webhook-запрос")
+            update = telebot.types.Update.de_json(json_data)
+            bot.process_new_updates([update])
+            return '', 200
+        return 'Bad request', 400
+    except Exception as e:
+        logger.error(f"Ошибка в webhook: {str(e)}")
+        return 'Server error', 500
 
 def configure_webhook():
-    # ... (оставь как есть) ...
+    """Настраивает вебхук при запуске приложения"""
+    try:
+        # Для Render.com
+        if os.environ.get('RENDER'):
+            external_url = os.environ.get('RENDER_EXTERNAL_URL')
+            if external_url:
+                webhook_url = f"{external_url}/webhook"
+                # Проверка доступности бота
+                try:
+                    bot.get_me()
+                    logger.info("Бот доступен, устанавливаем вебхук")
+                except Exception as e:
+                    logger.error(f"Ошибка доступа к боту: {str(e)}")
+                    return
+                # Удаляем существующий вебхук перед установкой нового
+                bot.remove_webhook()
+                logger.info("Старый вебхук удален")
+                # Устанавливаем новый вебхук в фоновом потоке
+                def set_webhook_background():
+                    import time
+                    time.sleep(3)
+                    try:
+                        bot.set_webhook(url=webhook_url)
+                        logger.info(f"Вебхук установлен: {webhook_url}")
+                        # Проверяем информацию о вебхуке
+                        webhook_info = bot.get_webhook_info()
+                        logger.info(f"Информация о вебхуке: {webhook_info}")
+                    except Exception as e:
+                        logger.error(f"Ошибка установки вебхука: {str(e)}")
+                thread = threading.Thread(target=set_webhook_background)
+                thread.daemon = True
+                thread.start()
+                return
+            else:
+                logger.warning("RENDER_EXTERNAL_URL не найден!")
+        # Для других платформ/локального запуска
+        bot.remove_webhook()
+        logger.info("Вебхук удален, используется polling")
+    except Exception as e:
+        logger.error(f"Ошибка настройки вебхука: {str(e)}")
 
 # Установка вебхука после определения всех обработчиков
 configure_webhook()
