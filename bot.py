@@ -1,466 +1,177 @@
-import os
-import telebot
-import requests
 import logging
+from telegram import Update
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
+import os
+import asyncio
+from transformers import pipeline
+from PIL import Image
 import pytesseract
-from PIL import Image, ImageEnhance
 import io
-from flask import Flask, request
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-import threading
-import time
-import base64
-import hashlib
-from collections import deque
-import json
-from concurrent.futures import ThreadPoolExecutor
+import re
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+# Глобальные переменные для моделей
+qa_pipeline = None
+ocr_config = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
 
-# Конфигурация
-BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-HF_API_TOKEN = os.environ.get('HF_API_TOKEN')  # Ключ для Hugging Face
+# Кэш контекста пользователей (user_id: context)
+user_context = {}
 
-if not BOT_TOKEN:
-    logger.error("TELEGRAM_BOT_TOKEN не установлен!")
-    raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+def init_qa_model():
+    """Инициализация QA модели один раз при старте"""
+    global qa_pipeline
+    logger.info("Инициализация QA модели...")
+    qa_pipeline = pipeline(
+        'question-answering',
+        model='AlexKay/xlm-roberta-large-qa-multilingual-finedtuned-ru',
+        device=0 if os.getenv('USE_GPU', 'false') == 'true' else -1
+    )
+    logger.info("QA модель инициализирована")
 
-if not HF_API_TOKEN:
-    logger.warning("HF_API_TOKEN не установлен! Будет использоваться только OCR")
-
-# Настройка Tesseract
-if os.environ.get('PYTESSERACT_TESSERACT_CMD'):
-    pytesseract.pytesseract.tesseract_cmd = os.environ['PYTESSERACT_TESSERACT_CMD']
-
-bot = telebot.TeleBot(BOT_TOKEN)
-logger.info("Бот инициализирован")
-
-# Проверка доступности Tesseract
-try:
-    tesseract_version = pytesseract.get_tesseract_version()
-    logger.info(f"Tesseract version: {tesseract_version}")
-except Exception as e:
-    logger.error(f"Tesseract check failed: {str(e)}")
-
-# Хранение истории и кэша
-user_history = {}
-question_cache = {}
-image_executor = ThreadPoolExecutor(max_workers=2)
-MAX_HISTORY_ITEMS = 10
-
-# Модели Hugging Face
-TEXT_MODEL = "IlyaGusev/rugpt3medium_sum_gazeta"  # Русскоязычная модель
-IMAGE_MODEL = "Salesforce/blip-image-captioning-base"
-HF_API_URL = "https://api-inference.huggingface.co/models"
-
-def create_menu():
-    """Создает клавиатуру с основными кнопками"""
-    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(KeyboardButton('📝 Задать вопрос'))
-    markup.add(KeyboardButton('📷 Отправить фото'), KeyboardButton('📚 История'))
-    markup.add(KeyboardButton('ℹ️ Помощь'))
-    return markup
-
-def compress_image(image_data, max_size=1024*1024):
-    """Оптимизированное сжатие изображений"""
+async def image_to_text(image_bytes: bytes) -> str:
+    """Конвертирует изображение в текст с помощью Tesseract OCR"""
     try:
-        img = Image.open(io.BytesIO(image_data))
-        original_size = len(image_data)
+        # Открытие изображения из байтов
+        image = Image.open(io.BytesIO(image_bytes))
         
-        # Ресайз больших изображений
-        if max(img.size) > 1600:
-            ratio = 1600 / max(img.size)
-            new_size = (int(img.width * ratio), int(img.height * ratio))
-            img = img.resize(new_size, Image.LANCZOS)
+        # Предобработка изображения
+        image = image.convert('L')  # В градации серого
+        image = image.point(lambda x: 0 if x < 140 else 255)  # Бинаризация
         
-        # Конвертация в JPEG
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-            
-        # Постепенное снижение качества
-        quality = 85
-        output_buffer = io.BytesIO()
-        img.save(output_buffer, format="JPEG", quality=quality, optimize=True)
-        compressed_data = output_buffer.getvalue()
-        
-        # Логирование степени сжатия
-        compression_ratio = original_size / len(compressed_data) if compressed_data else 1
-        logger.info(f"Изображение сжато: {original_size/1024:.1f}KB → {len(compressed_data)/1024:.1f}KB (ratio: {compression_ratio:.1f}x)")
-        
-        return compressed_data
-        
-    except Exception as e:
-        logger.error(f"Ошибка сжатия изображения: {str(e)}")
-        return image_data
-
-def ask_hf(prompt, image_data=None):
-    """Запрашивает ответ у Hugging Face API"""
-    if not HF_API_TOKEN:
-        return None
-        
-    try:
-        # Кэширование запросов
-        cache_str = prompt
-        if image_data:
-            cache_str += hashlib.md5(image_data).hexdigest()[:16]
-        cache_key = hashlib.md5(cache_str.encode('utf-8')).hexdigest()
-        
-        if cache_key in question_cache:
-            logger.info("Используется кэшированный ответ")
-            return question_cache[cache_key]
-        
-        headers = {
-            "Authorization": f"Bearer {HF_API_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        # Обработка изображений
-        if image_data:
-            # Используем модель описания изображений
-            model = IMAGE_MODEL
-            response = requests.post(
-                f"{HF_API_URL}/{model}",
-                headers=headers,
-                data=image_data,
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                caption = response.json()[0]['generated_text']
-                logger.info(f"Сгенерировано описание изображения: {caption}")
-                
-                # Формируем новый промпт с описанием изображения
-                prompt = f"{prompt} Описание изображения: {caption}"
-            else:
-                logger.error(f"Ошибка HF Vision API: {response.status_code} - {response.text}")
-                return None
-        
-        # Текстовый запрос
-        model = TEXT_MODEL
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 512,
-                "temperature": 0.7,
-                "repetition_penalty": 1.2
-            }
-        }
-        
-        response = requests.post(
-            f"{HF_API_URL}/{model}",
-            headers=headers,
-            json=payload,
-            timeout=120
+        # Распознавание текста
+        text = pytesseract.image_to_string(
+            image,
+            lang='rus+eng',
+            config=ocr_config
         )
         
-        # Обработка ответа
-        if response.status_code == 200:
-            result = response.json()[0]['generated_text']
-            
-            # Убираем повторение промпта в ответе
-            if prompt in result:
-                result = result.replace(prompt, "").strip()
-            
-            # Сохраняем в кэш
-            question_cache[cache_key] = result
-            return result
-        else:
-            error_msg = f"Ошибка HF API: {response.status_code} - {response.text}"
-            logger.error(error_msg)
-            return f"⚠️ Ошибка ИИ: {response.text[:100]}" if response.text else "⚠️ Ошибка ИИ"
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка запроса к HF API: {str(e)}")
+        # Очистка текста
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text if text else "Не удалось распознать текст на изображении."
     except Exception as e:
-        logger.error(f"Общая ошибка в ask_hf: {str(e)}")
+        logger.error(f"OCR error: {e}")
+        return "Ошибка обработки изображения."
+
+async def get_answer(question: str, context: str) -> str:
+    """Получение ответа на вопрос с помощью QA модели"""
+    try:
+        if not qa_pipeline:
+            init_qa_model()
+            
+        # Ограничение контекста (модели имеют лимит токенов)
+        max_context_length = 10000
+        if len(context) > max_context_length:
+            context = context[:max_context_length]
+            
+        # Запуск модели в отдельном потоке
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, 
+            lambda: qa_pipeline(question=question, context=context)
+        )
+        
+        return result['answer'] if result['score'] > 0.1 else "Не могу найти ответ в предоставленном тексте."
+    except Exception as e:
+        logger.error(f"QA error: {e}")
+        return "Ошибка обработки запроса."
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик входящих сообщений"""
+    user_id = update.message.from_user.id
+    msg = update.message
     
-    return None
-
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    try:
-        logger.info(f"Обработка команды /start от {message.chat.id}")
-        response = (
-            "👋 Привет! Я твой умный бот-помощник для учебы!\n\n"
-            "Я использую продвинутый ИИ для ответов на вопросы. Могу помочь с:\n"
-            "• Текстовыми вопросами по любой теме\n"
-            "• Распознаванием и анализом фотографий\n"
-            "• Поиском учебных материалов\n\n"
-            "📌 Просто задай вопрос или отправь фото с заданием!\n\n"
-            "ℹ️ Используемые технологии: Hugging Face, Tesseract OCR"
+    # Обработка изображений
+    if msg.photo:
+        try:
+            # Получаем фото с наилучшим качеством
+            photo_file = await msg.photo[-1].get_file()
+            image_bytes = await photo_file.download_as_bytearray()
+            
+            # Распознаем текст
+            text = await image_to_text(image_bytes)
+            
+            # Сохраняем контекст для пользователя
+            user_context[user_id] = text
+            
+            # Формируем ответ
+            response = "✅ Текст успешно распознан!\n\n"
+            response += f"Распознано символов: {len(text)}\n\n"
+            response += "Теперь задайте вопрос по этому тексту."
+            
+            await msg.reply_text(response)
+        except Exception as e:
+            logger.error(f"Photo processing error: {e}")
+            await msg.reply_text("⚠️ Ошибка обработки изображения. Попробуйте другое фото.")
+        return
+    
+    # Обработка текстовых сообщений
+    user_text = msg.text.strip()
+    
+    # Если это первый запрос без контекста
+    if user_id not in user_context:
+        await msg.reply_text(
+            "ℹ️ Пожалуйста, сначала отправьте изображение с текстом, "
+            "чтобы я мог его проанализировать, а затем задайте вопрос."
         )
-        bot.send_message(
-            message.chat.id,
-            response,
-            reply_markup=create_menu()
-        )
-        logger.info("Приветственное сообщение отправлено")
-    except Exception as e:
-        logger.error(f"Ошибка в send_welcome: {str(e)}")
-
-@bot.message_handler(func=lambda message: message.text == 'ℹ️ Помощь')
-def handle_help(message):
-    send_welcome(message)
-
-@bot.message_handler(func=lambda message: message.text == '📝 Задать вопрос')
-def handle_ask_question(message):
+        return
+    
+    # Проверка на команды управления
+    if user_text.lower() == '/clear':
+        user_context.pop(user_id, None)
+        await msg.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
+        return
+    
+    # Получаем контекст пользователя
+    context_text = user_context[user_id]
+    
+    # Показываем статус обработки
+    status_msg = await msg.reply_text("🔍 Анализирую ваш вопрос...")
+    
     try:
-        logger.info(f"Обработка 'Задать вопрос' от {message.chat.id}")
-        msg = bot.send_message(message.chat.id, "📝 Введите ваш вопрос:", reply_markup=None)
-        bot.register_next_step_handler(msg, process_text_question)
+        # Получаем ответ
+        answer = await get_answer(user_text, context_text)
+        
+        # Форматируем ответ
+        response = f"❓ Вопрос: {user_text}\n\n"
+        response += f"💡 Ответ: {answer}\n\n"
+        response += "Для нового запроса отправьте /clear"
+        
+        await status_msg.edit_text(response)
     except Exception as e:
-        logger.error(f"Ошибка в handle_ask_question: {str(e)}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
+        logger.error(f"Error processing question: {e}")
+        await status_msg.edit_text("⚠️ Произошла ошибка при обработке вашего вопроса. Попробуйте снова.")
 
-@bot.message_handler(func=lambda message: message.text == '📷 Отправить фото')
-def handle_ask_photo(message):
-    try:
-        logger.info(f"Запрос на отправку фото от {message.chat.id}")
-        bot.send_message(message.chat.id, "📸 Отправьте фотографию с заданием:", reply_markup=None)
-    except Exception as e:
-        logger.error(f"Ошибка в handle_ask_photo: {str(e)}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=create_menu())
+def main() -> None:
+    """Запуск бота."""
+    # Получение токена из переменных окружения
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise ValueError("Токен Telegram бота не установлен в переменных окружения!")
+    
+    # Установка пути к Tesseract (уже настроено в Dockerfile)
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+    
+    # Предварительная инициализация модели (если есть GPU)
+    if os.getenv('PRELOAD_MODEL', 'false') == 'true':
+        init_qa_model()
+    
+    # Создание приложения
+    application = Application.builder().token(token).build()
+    
+    # Регистрация обработчиков
+    application.add_handler(MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Обработчик команды /clear
+    application.add_handler(MessageHandler(filters.Regex(r'^/clear$'), handle_message))
+    
+    # Запуск бота
+    application.run_polling()
 
-def process_text_question(message):
-    try:
-        chat_id = message.chat.id
-        question = message.text
-        logger.info(f"Обработка текстового вопроса от {chat_id}: {question}")
-        
-        if len(question) < 3:
-            bot.send_message(chat_id, "❌ Вопрос слишком короткий. Пожалуйста, уточните запрос.", reply_markup=create_menu())
-            return
-            
-        bot.send_chat_action(chat_id, 'typing')
-        
-        # Запрос к Hugging Face
-        ai_response = ask_hf(question)
-        
-        if ai_response:
-            # Форматируем ответ
-            formatted_response = f"<b>🤖 Ответ ИИ:</b>\n\n{ai_response}"
-            
-            # Сохраняем в историю
-            if chat_id not in user_history:
-                user_history[chat_id] = deque(maxlen=MAX_HISTORY_ITEMS)
-            user_history[chat_id].append({
-                "type": "text",
-                "question": question,
-                "response": formatted_response
-            })
-            
-            # Отправляем ответ
-            bot.send_message(
-                chat_id,
-                formatted_response,
-                parse_mode='HTML',
-                reply_markup=create_menu()
-            )
-            logger.info("Ответ от ИИ отправлен")
-        else:
-            bot.send_message(
-                chat_id,
-                "⚠️ Не удалось получить ответ. Проверьте настройки API или попробуйте позже.",
-                reply_markup=create_menu()
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка в process_text_question: {str(e)}")
-        bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
-
-def handle_photo_result(future, message):
-    """Обработка результата анализа изображения"""
-    try:
-        chat_id = message.chat.id
-        result = future.result()
-        if not result:
-            bot.send_message(chat_id, "⚠️ Ошибка обработки изображения", reply_markup=create_menu())
-            return
-            
-        file_data, original_file_size, compressed_size = result
-        
-        logger.info(f"Обработка фото: оригинал {original_file_size/1024:.1f}KB → сжато {compressed_size/1024:.1f}KB")
-        bot.send_message(chat_id, "🤖 Анализирую изображение...")
-        
-        # Запрос к Hugging Face Vision
-        prompt = "Пользователь отправил фотографию с учебным заданием. Проанализируй изображение и дай развернутый ответ."
-        ai_response = ask_hf(prompt, image_data=file_data)
-        
-        if ai_response:
-            # Форматируем ответ
-            formatted_response = (
-                f"<b>📸 Анализ изображения:</b>\n\n"
-                f"{ai_response}"
-            )
-            
-            # Сохраняем в историю
-            if chat_id not in user_history:
-                user_history[chat_id] = deque(maxlen=MAX_HISTORY_ITEMS)
-            user_history[chat_id].append({
-                "type": "image",
-                "question": "Фото с заданием",
-                "response": formatted_response,
-                "file_size": f"{compressed_size/1024:.1f}KB"
-            })
-            
-            # Отправляем ответ
-            bot.send_message(
-                chat_id,
-                formatted_response,
-                parse_mode='HTML',
-                reply_markup=create_menu()
-            )
-        else:
-            bot.send_message(
-                chat_id,
-                "⚠️ Не удалось проанализировать изображение. Попробуйте еще раз.",
-                reply_markup=create_menu()
-            )
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото результата: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
-
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    try:
-        chat_id = message.chat.id
-        logger.info(f"Получено фото от {chat_id}")
-        
-        # Получаем фото с наилучшим качеством
-        file_id = message.photo[-1].file_id
-        file_info = bot.get_file(file_id)
-        file_data = bot.download_file(file_info.file_path)
-        original_size = len(file_data)
-        
-        bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
-        
-        # Отправляем в отдельный поток для сжатия
-        future = image_executor.submit(
-            lambda data: (compress_image(data), original_size, len(compress_image(data))),
-            file_data
-        )
-        future.add_done_callback(lambda f: handle_photo_result(f, message))
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при обработке изображения.", reply_markup=create_menu())
-
-@bot.message_handler(func=lambda message: message.text == '📚 История')
-def handle_history(message):
-    try:
-        chat_id = message.chat.id
-        logger.info(f"Обработка 'История' от {chat_id}")
-        
-        if chat_id not in user_history or not user_history[chat_id]:
-            bot.send_message(chat_id, "📭 История запросов пуста.", reply_markup=create_menu())
-            return
-        
-        history = user_history[chat_id]
-        response = "📚 Ваша история запросов:\n\n"
-        
-        for i, item in enumerate(reversed(history), 1):
-            # Обрезаем длинные вопросы
-            question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
-            item_type = "📷" if item['type'] == "image" else "📝"
-            
-            response += f"{item_type} <b>{i}. {question}</b>\n"
-            if item['type'] == "image":
-                response += f"   └ Размер: {item.get('file_size', 'N/A')}\n"
-            response += "─" * 20 + "\n"
-        
-        bot.send_message(
-            chat_id,
-            response,
-            parse_mode='HTML',
-            reply_markup=create_menu()
-        )
-        
-        logger.info("История отправлена")
-    except Exception as e:
-        logger.error(f"Ошибка в handle_history: {str(e)}")
-        bot.send_message(chat_id, "⚠️ Произошла ошибка при получении истории.", reply_markup=create_menu())
-
-@app.route('/')
-def home():
-    return "🤖 Telegram Study Bot активен! Используйте /start в Telegram"
-
-@app.route('/health')
-def health_check():
-    """Endpoint для проверки работоспособности"""
-    return "OK", 200
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        if request.headers.get('content-type') == 'application/json':
-            json_data = request.get_json()
-            logger.info("Получен webhook-запрос")
-            
-            update = telebot.types.Update.de_json(json_data)
-            bot.process_new_updates([update])
-            return '', 200
-        return 'Bad request', 400
-    except Exception as e:
-        logger.error(f"Ошибка в webhook: {str(e)}")
-        return 'Server error', 500
-
-def configure_webhook():
-    """Настраивает вебхук при запуске приложения"""
-    try:
-        if os.environ.get('RENDER'):
-            external_url = os.environ.get('RENDER_EXTERNAL_URL')
-            if external_url:
-                webhook_url = f"{external_url}/webhook"
-                
-                try:
-                    bot.get_me()
-                    logger.info("Бот доступен, устанавливаем вебхук")
-                except Exception as e:
-                    logger.error(f"Ошибка доступа к боту: {str(e)}")
-                    return
-                
-                bot.remove_webhook()
-                logger.info("Старый вебхук удален")
-                
-                def set_webhook_background():
-                    import time
-                    time.sleep(3)
-                    try:
-                        bot.set_webhook(
-                            url=webhook_url,
-                            max_connections=50,
-                            allowed_updates=["message", "callback_query"]
-                        )
-                        logger.info(f"Вебхук установлен: {webhook_url}")
-                        webhook_info = bot.get_webhook_info()
-                        logger.info(f"Информация о вебхуке: {json.dumps(webhook_info.__dict__, indent=2)}")
-                    except Exception as e:
-                        logger.error(f"Ошибка установки вебхука: {str(e)}")
-                
-                thread = threading.Thread(target=set_webhook_background)
-                thread.daemon = True
-                thread.start()
-                return
-            else:
-                logger.warning("RENDER_EXTERNAL_URL не найден!")
-        
-        bot.remove_webhook()
-        logger.info("Вебхук удален, используется polling")
-    except Exception as e:
-        logger.error(f"Ошибка настройки вебхука: {str(e)}")
-
-# Установка вебхука после определения всех обработчиков
-configure_webhook()
-
-if __name__ == '__main__':
-    logger.info("Локальный запуск: используется polling")
-    bot.remove_webhook()
-    bot.infinity_polling()
+if __name__ == "__main__":
+    main()
