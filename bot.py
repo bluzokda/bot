@@ -24,7 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
+API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"  # Убрал лишний пробел
 HF_TOKEN = os.getenv("HF_TOKEN")
 HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 OCR_CONFIG = r'--oem 3 --psm 6 -c preserve_interword_spaces=1'
@@ -84,7 +84,7 @@ async def get_answer(question: str, context: str) -> str:
     }
     
     try:
-        response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=20)
+        response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
@@ -118,9 +118,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await msg.reply_chat_action(action="typing")
         photo_file = await msg.photo[-1].get_file()
-        image_bytes = await photo_file.download_as_bytearray()
+        # Исправлено: правильно получаем байты
+        image_bytes = await photo_file.download_to_memory()
+        image_data = image_bytes.getbuffer().tobytes()
         
-        text = await image_to_text(image_bytes)
+        text = await image_to_text(image_data)
         
         # Проверка результата распознавания
         if "не удалось" in text.lower() or "ошибка" in text.lower() or len(text) < 10:
@@ -159,7 +161,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Команда помощи
-    if user_text.lower() in ['/help', 'помощь']:
+    if user_text.lower() in ['/help', '/помощь']:
         help_text = (
             "🤖 *Помощь по боту*\n\n"
             "Отправьте фото с текстом (тест, контрольная и т.д.), а затем задавайте вопросы по нему.\n\n"
@@ -171,7 +173,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Решение задачи 3\n"
             "• Что написано в пункте 2.1?"
         )
-        await msg.reply_text(help_text)
+        await msg.reply_text(help_text, parse_mode="Markdown")
         return
     
     # Проверка контекста
@@ -204,7 +206,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Error processing question")
         await status_msg.edit_text("⚠️ Произошла ошибка при обработке вашего вопроса")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
     await update.message.reply_text(
@@ -213,6 +215,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "а затем задавайте вопросы по его содержанию.\n\n"
         "Используйте /help для получения дополнительной информации."
     )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    help_text = (
+        "🤖 *Помощь по боту*\n\n"
+        "Отправьте фото с текстом (тест, контрольная и т.д.), а затем задавайте вопросы по нему.\n\n"
+        "Команды:\n"
+        "/start, /new, /clear - очистить текущий контекст\n"
+        "/help - показать это сообщение\n\n"
+        "После отправки фото задавайте вопросы по тексту, например:\n"
+        "• Какой ответ на вопрос 5?\n"
+        "• Решение задачи 3\n"
+        "• Что написано в пункте 2.1?"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /clear"""
+    user_id = update.effective_user.id
+    if user_id in user_context:
+        del user_context[user_id]
+        logger.info(f"Context cleared for user {user_id}")
+    await update.message.reply_text("🔄 Контекст очищен. Отправьте новое изображение.")
 
 def main() -> None:
     """Запуск бота"""
@@ -225,18 +250,15 @@ def main() -> None:
     
     application = Application.builder().token(token).build()
     
-    # Регистрация обработчиков
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", handle_text))
-    application.add_handler(CommandHandler("new", handle_text))
-    application.add_handler(CommandHandler("clear", handle_text))
+    # Регистрация обработчиков команд
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("new", clear_command))
+    application.add_handler(CommandHandler("clear", clear_command))
     
     # Обработчики по типу контента
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    # Обработчик для команд в тексте
-    application.add_handler(MessageHandler(filters.COMMAND, handle_text))
     
     logger.info("Бот запущен")
     application.run_polling()
