@@ -18,3 +18,31 @@ jobs:
           --build-arg HF_TOKEN=${{ secrets.HF_TOKEN }} \
           --build-arg TELEGRAM_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }} \
           -t telegram-bot .
+    
+    - name: Push to Docker Hub
+      env:
+        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      run: |
+        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+        docker tag telegram-bot $DOCKER_USERNAME/telegram-bot:latest
+        docker push $DOCKER_USERNAME/telegram-bot:latest
+
+  deploy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy to server
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ secrets.SERVER_IP }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/telegram-bot:latest
+          docker stop bot || true
+          docker rm bot || true
+          docker run -d --name bot \
+            -e TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }} \
+            -e HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            ${{ secrets.DOCKER_USERNAME }}/telegram-bot:latest
