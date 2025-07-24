@@ -1,3 +1,6 @@
+# Используем официальный образ Python
+FROM python:3.11-slim-bullseye
+
 # Установка Tesseract и языков
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
