@@ -12,19 +12,15 @@ RUN apt-get update && apt-get install -y \
 # Настройка переменных окружения
 ENV PYTESSERACT_TESSERACT_CMD=/usr/bin/tesseract
 ENV TELEGRAM_BOT_TOKEN="7452800190:AAGGWsVqA92kf6n3BJJ9ODpEyghKA_2T7Do"
-ENV DEEPSEEK_API_KEY="sk-b27a98faf13d415685705ed4d0713099"
+ARG HF_TOKEN
+ENV HF_APT_TOKEN=$HF_TOKEN
 
-# Рабочая директория
 WORKDIR /app
 
-# Копирование зависимостей
 COPY requirements.txt .
 
-# Установка Python-зависимостей
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование исходного кода
 COPY . .
 
-# Команда запуска
 CMD ["sh", "-c", "gunicorn --workers 1 --timeout 600 --bind 0.0.0.0:$PORT bot:app"]
