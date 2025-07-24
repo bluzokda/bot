@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bullseye
+FROM python:3.11-slim-bullseye
 
 # Установка Tesseract и языков
 RUN apt-get update && apt-get install -y \
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
 
 # Настройка переменных окружения
 ENV PYTESSERACT_TESSERACT_CMD=/usr/bin/tesseract
+ENV PYTHONUNBUFFERED=1
 
 # Рабочая директория
 WORKDIR /app
@@ -25,4 +26,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Команда запуска
-CMD ["sh", "-c", "gunicorn --workers 1 --timeout 600 --bind 0.0.0.0:$PORT bot:app"]
+CMD ["gunicorn", "--workers", "1", "--timeout", "600", "--bind", "0.0.0.0:$PORT", "bot:app"]
