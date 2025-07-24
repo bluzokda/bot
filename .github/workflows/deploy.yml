@@ -1,0 +1,20 @@
+name: Build and Deploy Bot
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Build Docker image
+      run: |
+        docker build \
+          --build-arg HF_TOKEN=${{ secrets.HF_TOKEN }} \
+          --build-arg TELEGRAM_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }} \
+          -t telegram-bot .
