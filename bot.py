@@ -113,48 +113,70 @@ def search_duckduckgo_html(query):
         logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
     return None
 
-def search_searx_api(query):
-    """Поиск через Searx API (бесплатный, без ключа) - запасной метод"""
+def search_wikipedia(query):
+    """Поиск через Wikipedia API (бесплатный, без ключа) - запасной метод"""
     try:
-        logger.info(f"Поиск в Searx API (резерв): {query}")
-        encoded_query = quote_plus(query)
-        # Используем публичный экземпляр Searx
-        url = f"https://searx.work/search?q={encoded_query}&language=ru&format=json&categories=general"
-
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        logger.info(f"Searx API status: {response.status_code}")
+        logger.info(f"Поиск в Wikipedia (резерв): {query}")
+        # Сначала ищем статьи
+        search_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{quote_plus(query)}"
+        
+        response = requests.get(search_url, headers=HEADERS, timeout=15)
+        logger.info(f"Wikipedia status: {response.status_code}")
 
         if response.status_code == 200:
             data = response.json()
             results = []
-            search_results = data.get("results", [])
-
-            logger.info(f"Searx API found {len(search_results)} results")
-
-            for item in search_results[:5]:  # Только топ-5
-                # Проверяем обязательные поля
-                if "title" in item and "content" in item:
+            
+            title = data.get("title", "Без названия")
+            snippet = data.get("extract", "Описание отсутствует")
+            url = data.get("content_urls", {}).get("desktop", {}).get("page", "#")
+            
+            if title and snippet:
+                results.append({
+                    "title": title[:150],
+                    "url": url,
+                    "snippet": snippet[:300]
+                })
+                logger.info(f"Найдено в Wikipedia: 1 результат")
+                return results
+        elif response.status_code == 404:
+            # Если точное совпадение не найдено, пробуем поиск
+            search_url = f"https://ru.wikipedia.org/w/api.php"
+            params = {
+                'action': 'query',
+                'format': 'json',
+                'list': 'search',
+                'srsearch': query,
+                'srlimit': 3
+            }
+            
+            search_response = requests.get(search_url, params=params, headers=HEADERS, timeout=15)
+            if search_response.status_code == 200:
+                search_data = search_response.json()
+                results = []
+                search_results = search_data.get("query", {}).get("search", [])
+                
+                for item in search_results:
                     title = item.get("title", "Без названия")
-                    snippet = item.get("content", "Описание отсутствует")
-                    url = item.get("url", "#")
-
-                    # Фильтруем пустые результаты
-                    if title and snippet and len(title.strip()) > 6 and len(snippet.strip()) > 10:
+                    snippet = item.get("snippet", "Описание отсутствует")
+                    # Очищаем HTML теги из сниппета
+                    snippet = re.sub(r'<.*?>', '', snippet)
+                    url = f"https://ru.wikipedia.org/wiki/{quote_plus(title)}"
+                    
+                    if title and snippet:
                         results.append({
                             "title": title[:150],
                             "url": url,
                             "snippet": snippet[:300]
                         })
-
-            if results:
-                logger.info(f"Найдено в Searx API: {len(results)} результатов")
-                return results
-            else:
-                logger.warning("Searx API вернул пустые результаты")
+                
+                if results:
+                    logger.info(f"Найдено в Wikipedia поиске: {len(results)} результатов")
+                    return results
         else:
-            logger.warning(f"Searx API вернул статус {response.status_code}")
+            logger.warning(f"Wikipedia вернул статус {response.status_code}")
     except Exception as e:
-        logger.error(f"Ошибка поиска в Searx API: {str(e)}")
+        logger.error(f"Ошибка поиска в Wikipedia: {str(e)}")
     return None
 
 def search_internet(query):
@@ -169,11 +191,11 @@ def search_internet(query):
             logger.info("Успешно получены результаты от DuckDuckGo HTML")
             return results
 
-        # Если DuckDuckGo не сработал, пробуем Searx API (резерв)
-        logger.info("DuckDuckGo HTML не дал результатов, пробуем Searx API...")
-        results = search_searx_api(query)
+        # Если DuckDuckGo не сработал, пробуем Wikipedia (резерв)
+        logger.info("DuckDuckGo HTML не дал результатов, пробуем Wikipedia...")
+        results = search_wikipedia(query)
         if results and len(results) > 0:
-            logger.info("Успешно получены результаты от Searx API")
+            logger.info("Успешно получены результаты от Wikipedia")
             return results
 
         logger.warning("Не удалось получить результаты ни от одного источника")
