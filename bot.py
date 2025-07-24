@@ -13,8 +13,6 @@ import time
 import json
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
-from transformers import pipeline
-import torch
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,8 +24,6 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-HF_TOKEN = os.environ.get('HF_TOKEN')
-
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
@@ -42,22 +38,6 @@ try:
 except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
-
-# Инициализация модели Hugging Face (если токен есть)
-qa_pipeline = None
-if HF_TOKEN:
-    try:
-        logger.info("Загрузка модели Hugging Face...")
-        qa_pipeline = pipeline(
-            "question-answering",
-            model="deepset/roberta-base-squad2",
-            tokenizer="deepset/roberta-base-squad2"
-        )
-        logger.info("Модель Hugging Face загружена успешно")
-    except Exception as e:
-        logger.error(f"Ошибка загрузки модели Hugging Face: {e}")
-else:
-    logger.warning("HF_TOKEN не найден, ИИ-функции отключены")
 
 # Улучшенные заголовки для обхода блокировок
 HEADERS = {
@@ -125,44 +105,56 @@ def search_duckduckgo_html(query):
         logger.error(f"Ошибка поиска в DuckDuckGo HTML: {str(e)}")
     return None
 
-def get_ai_answer(question, context):
-    """Использует Hugging Face для извлечения точного ответа"""
-    if not qa_pipeline:
-        return None
-        
+def search_brave(query):
+    """Запасной поиск через Brave Search API"""
     try:
-        logger.info(f"ИИ обрабатывает вопрос: {question}")
-        # Ограничиваем контекст для лучшей производительности
-        context = context[:2000]
-        result = qa_pipeline(question=question, context=context)
+        logger.info(f"Поиск в Brave (резерв): {query}")
+        encoded_query = quote_plus(query)
+        url = f"https://api.search.brave.com/res/v1/web/search?q={encoded_query}&count=3&search_lang=ru"
         
-        # Проверяем уверенность модели
-        if result['score'] > 0.1:  # Минимальный порог уверенности
-            answer = result['answer']
-            confidence = result['score']
-            logger.info(f"ИИ ответ: {answer} (уверенность: {confidence:.2f})")
-            return {
-                "answer": answer,
-                "confidence": confidence,
-                "context_used": context[:200] + "..." if len(context) > 200 else context
-            }
+        # Используем публичный токен
+        brave_headers = HEADERS.copy()
+        brave_headers["X-Subscription-Token"] = "BSAkvgKRhAoFTHCWyQqMqNwN8gkf4QDN"
+        
+        response = requests.get(url, headers=brave_headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            web_results = data.get("web", {}).get("results", [])
+            
+            for item in web_results[:3]:
+                results.append({
+                    "title": item.get("title", "Без названия")[:150],
+                    "url": item.get("url", "#"),
+                    "snippet": item.get("description", "Описание отсутствует")[:300]
+                })
+            
+            if results:
+                logger.info(f"Найдено в Brave: {len(results)} результатов")
+                return results
         else:
-            logger.info("ИИ не уверен в ответе")
-            return None
+            logger.warning(f"Brave API вернул статус {response.status_code}")
     except Exception as e:
-        logger.error(f"Ошибка ИИ: {e}")
-        return None
+        logger.error(f"Ошибка поиска в Brave: {str(e)}")
+    return None
 
 def search_internet(query):
-    """Ищет информацию по запросу через DuckDuckGo HTML"""
+    """Ищет информацию по запросу через несколько источников"""
     try:
         logger.info(f"Поисковый запрос: {query}")
         
-        # Пробуем DuckDuckGo HTML
+        # Пробуем DuckDuckGo HTML (основной)
         logger.info("Пробуем DuckDuckGo HTML...")
         results = search_duckduckgo_html(query)
         if results and len(results) > 0:
             logger.info("Успешно получены результаты от DuckDuckGo HTML")
+            return results
+            
+        # Если DuckDuckGo не сработал, пробуем Brave (резерв)
+        logger.info("DuckDuckGo HTML не дал результатов, пробуем Brave...")
+        results = search_brave(query)
+        if results and len(results) > 0:
+            logger.info("Успешно получены результаты от Brave")
             return results
             
         logger.warning("Не удалось получить результаты ни от одного источника")
@@ -242,7 +234,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
+            "• Искать ответы на текстовые вопросы\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -299,38 +291,17 @@ def process_text_question(message):
         
         # Ищем ответ
         search_results = search_internet(question)
-        if not search_results:
-            bot.send_message(
-                chat_id, 
-                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
-                reply_markup=create_menu()
-            )
-            return
         
-        # Берем лучший результат как контекст для ИИ
-        best_result = search_results[0]
-        context = best_result['snippet']
-        title = best_result['title']
-        url = best_result['url']
-        
-        # Пытаемся получить точный ответ через ИИ
-        ai_response = get_ai_answer(question, context)
-        
-        if ai_response:
-            # Возвращаем точный ответ от ИИ
-            response_text = f"🤖 <b>Точный ответ:</b>\n{ai_response['answer']}\n"
-            response_text += f"<i>Уверенность: {ai_response['confidence']:.2f}</i>\n\n"
-            response_text += f"<b>Источник:</b> {title}\n"
-            if url != "#" and url:
-                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+        response_text = "🔍 Вот что я нашел по вашему вопросу:\n\n"
+        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            response_text += f"<b>{i}. {title}</b>\n"
+            response_text += f"<i>{res['snippet']}</i>\n"
+            if res['url'] != "#" and res['url']:
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
             else:
-                response_text += f"<i>Контекст: {ai_response['context_used']}</i>"
-        else:
-            # Если ИИ не дал точного ответа, возвращаем обычный результат
-            response_text = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
-            response_text += f"<b>Источник:</b> {title}\n"
-            if url != "#" and url:
-                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+                response_text += "\n"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -339,7 +310,7 @@ def process_text_question(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,
+            disable_web_page_preview=True,  # Отключаем для стабильности
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
@@ -383,38 +354,16 @@ def handle_photo(message):
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
         search_results = search_internet(text)
         
-        if not search_results:
-            # Попробуем найти по ключевым словам
-            keywords = ' '.join(text.split()[:10])
-            search_results = search_internet(keywords)
-            if not search_results:
-                bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
-                return
-        
-        # Берем лучший результат как контекст для ИИ
-        best_result = search_results[0]
-        context = best_result['snippet']
-        title = best_result['title']
-        url = best_result['url']
-        
-        # Пытаемся получить точный ответ через ИИ
-        ai_response = get_ai_answer(text[:100] + "...", context)  # Используем начало текста как вопрос
-        
-        if ai_response:
-            # Возвращаем точный ответ от ИИ
-            response_text = f"🤖 <b>Точный ответ:</b>\n{ai_response['answer']}\n"
-            response_text += f"<i>Уверенность: {ai_response['confidence']:.2f}</i>\n\n"
-            response_text += f"<b>Источник:</b> {title}\n"
-            if url != "#" and url:
-                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+        response_text = "🔍 Вот что я нашел по вашему заданию:\n\n"
+        for i, res in enumerate(search_results[:3], 1):  # Только топ-3 результата
+            # Укорачиваем слишком длинные заголовки
+            title = res['title'] if len(res['title']) < 100 else res['title'][:97] + "..."
+            response_text += f"<b>{i}. {title}</b>\n"
+            response_text += f"<i>{res['snippet']}</i>\n"
+            if res['url'] != "#" and res['url']:
+                response_text += f"<a href='{res['url']}'>🔗 Подробнее</a>\n"
             else:
-                response_text += f"<i>Контекст: {ai_response['context_used']}</i>"
-        else:
-            # Если ИИ не дал точного ответа, возвращаем обычный результат
-            response_text = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
-            response_text += f"<b>Источник:</b> {title}\n"
-            if url != "#" and url:
-                response_text += f"<a href='{url}'>🔗 Подробнее</a>"
+                response_text += "\n"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -423,7 +372,7 @@ def handle_photo(message):
             chat_id=chat_id,
             text=response_text,
             parse_mode='HTML',
-            disable_web_page_preview=True,
+            disable_web_page_preview=True,  # Отключаем для стабильности
             reply_markup=create_menu()
         )
         logger.info("Ответ по фото отправлен")
