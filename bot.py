@@ -10,8 +10,9 @@ from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import threading
 import re
 import time
-from bs4 import BeautifulSoup
 import json
+from transformers import pipeline
+import torch
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,17 +20,29 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+HF_TOKEN = os.environ.get('HF_TOKEN')  # Добавляем токен Hugging Face
+
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
+
+# Инициализация модели вопрос-ответ (загружается один раз при запуске)
+logger.info("Загрузка модели Hugging Face...")
+try:
+    qa_pipeline = pipeline("question-answering", 
+                          model="deepset/roberta-base-squad2",
+                          tokenizer="deepset/roberta-base-squad2")
+    logger.info("Модель Hugging Face загружена успешно")
+except Exception as e:
+    logger.error(f"Ошибка загрузки модели: {str(e)}")
+    qa_pipeline = None
 
 # Проверка доступности Tesseract
 try:
@@ -38,6 +51,13 @@ try:
 except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
+
+# Настройки поиска
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
 # Хранение истории
 user_history = {}
@@ -50,116 +70,17 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def search_google(query):
-    """Поиск в Google через пользовательский агент"""
+def search_internet(query):
+    """Ищет информацию по запросу через DuckDuckGo API"""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        }
-        
-        # Формируем URL для Google поиска
-        search_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&hl=ru&num=5"
-        
-        response = requests.get(search_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Ищем результаты поиска
-        results = []
-        search_results = soup.find_all('div', class_='g')[:5]  # Первые 5 результатов
-        
-        for result in search_results:
-            try:
-                title_elem = result.find('h3')
-                if title_elem:
-                    title = title_elem.get_text()
-                    
-                    # Ищем сниппет
-                    snippet_elem = result.find('span')
-                    snippet = snippet_elem.get_text() if snippet_elem else "Описание отсутствует"
-                    
-                    # Ищем ссылку
-                    link_elem = result.find('a')
-                    url = link_elem['href'] if link_elem and link_elem.get('href') else "#"
-                    
-                    if title and snippet:
-                        results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": snippet
-                        })
-            except Exception as e:
-                continue
-                
-        return results if results else None
-    except Exception as e:
-        logger.error(f"Ошибка поиска в Google: {str(e)}")
-        return None
-
-def search_yandex(query):
-    """Поиск в Яндекс через пользовательский агент"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        }
-        
-        # Формируем URL для Яндекс поиска
-        search_url = f"https://yandex.ru/search/?text={requests.utils.quote(query)}&lr=213"
-        
-        response = requests.get(search_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Ищем результаты поиска
-        results = []
-        search_results = soup.find_all('li', class_='serp-item')[:5]  # Первые 5 результатов
-        
-        for result in search_results:
-            try:
-                title_elem = result.find('h2')
-                if title_elem:
-                    title = title_elem.get_text()
-                    
-                    # Ищем сниппет
-                    snippet_elem = result.find('span', class_='OrganicTextContentSpan')
-                    snippet = snippet_elem.get_text() if snippet_elem else "Описание отсутствует"
-                    
-                    # Ищем ссылку
-                    link_elem = result.find('a')
-                    url = link_elem['href'] if link_elem and link_elem.get('href') else "#"
-                    
-                    if title and snippet:
-                        results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": snippet
-                        })
-            except Exception as e:
-                continue
-                
-        return results if results else None
-    except Exception as e:
-        logger.error(f"Ошибка поиска в Яндекс: {str(e)}")
-        return None
-
-def search_duckduckgo(query):
-    """Поиск в DuckDuckGo API"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        }
-        
+        logger.info(f"Поисковый запрос: {query}")
+        # Форматируем запрос для API
         formatted_query = re.sub(r'[^\w\s]', '', query).replace(" ", "+")
         url = f"https://api.duckduckgo.com/?q={formatted_query}&format=json&no_redirect=1&no_html=1&skip_disambig=1"
-        
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
-        
         data = response.json()
         results = []
-        
         # Основной результат
         if data.get("AbstractText"):
             results.append({
@@ -167,7 +88,6 @@ def search_duckduckgo(query):
                 "url": data.get("AbstractURL", "#"),
                 "snippet": data.get("AbstractText", "Описание отсутствует")
             })
-        
         # Похожие темы
         for topic in data.get("RelatedTopics", [])[:5]:
             if "FirstURL" in topic and "Text" in topic:
@@ -176,41 +96,75 @@ def search_duckduckgo(query):
                     "url": topic["FirstURL"],
                     "snippet": topic["Text"]
                 })
-        
+        # Результаты из внешних источников
+        for result in data.get("Results", [])[:5]:
+            results.append({
+                "title": result.get("Text", "Без названия"),
+                "url": result.get("FirstURL", "#"),
+                "snippet": result.get("Text", "Описание отсутствует")
+            })
+        logger.info(f"Найдено результатов: {len(results)}")
         return results if results else None
     except Exception as e:
-        logger.error(f"Ошибка поиска в DuckDuckGo: {str(e)}")
+        logger.error(f"Ошибка поиска: {str(e)}")
         return None
 
-def find_best_answer(query):
-    """Ищет лучший ответ, используя несколько поисковых систем"""
+def search_with_ai(question):
+    """Ищет информацию и использует ИИ для точного ответа"""
     try:
-        logger.info(f"Поиск лучшего ответа для: {query}")
+        logger.info(f"Поиск с ИИ для вопроса: {question}")
         
-        # Сначала пробуем DuckDuckGo (часто дает точные ответы)
-        ddg_results = search_duckduckgo(query)
-        if ddg_results:
-            # Проверяем, есть ли точный ответ
-            for result in ddg_results:
-                if "Основной результат" in result.get("title", "") or len(result.get("snippet", "")) > 50:
-                    return [result]  # Возвращаем точный ответ
+        # Сначала ищем контекст через интернет
+        search_results = search_internet(question)
+        if not search_results:
+            return "❌ Не удалось найти информацию по вашему запросу"
         
-        # Если DuckDuckGo не дал точного ответа, ищем в Google
-        google_results = search_google(query)
-        if google_results:
-            return google_results[:3]  # Возвращаем топ-3 результатов
+        # Берем лучший результат как контекст
+        best_result = search_results[0]
+        context = best_result['snippet']
+        title = best_result['title']
         
-        # Если Google не сработал, пробуем Яндекс
-        yandex_results = search_yandex(query)
-        if yandex_results:
-            return yandex_results[:3]  # Возвращаем топ-3 результатов
-        
-        # Если ничего не нашли, возвращаем DuckDuckGo результаты
-        return ddg_results[:3] if ddg_results else None
-        
+        # Если модель загружена, используем ИИ для точного ответа
+        if qa_pipeline:
+            try:
+                # Используем ИИ для извлечения точного ответа
+                result = qa_pipeline(question=question, context=context)
+                
+                if result['score'] > 0.1:  # Минимальный порог уверенности
+                    ai_answer = result['answer']
+                    confidence = result['score']
+                    response = f"🤖 <b>Точный ответ:</b> {ai_answer}\n"
+                    response += f"<i>Уверенность: {confidence:.2f}</i>\n\n"
+                    response += f"<b>Источник:</b> {title}\n"
+                    if best_result['url'] != "#":
+                        response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
+                    return response
+                else:
+                    # Если ИИ не уверен, возвращаем оригинальный результат
+                    response = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+                    response += f"<b>Источник:</b> {title}\n"
+                    if best_result['url'] != "#":
+                        response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
+                    return response
+            except Exception as ai_error:
+                logger.error(f"Ошибка ИИ: {str(ai_error)}")
+                # fallback к обычному результату поиска
+                response = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+                response += f"<b>Источник:</b> {title}\n"
+                if best_result['url'] != "#":
+                    response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
+                return response
+        else:
+            # Если модель не загружена, возвращаем обычный результат
+            response = f"🔍 <b>Найденная информация:</b>\n{context}\n\n"
+            response += f"<b>Источник:</b> {title}\n"
+            if best_result['url'] != "#":
+                response += f"<a href='{best_result['url']}'>🔗 Подробнее</a>"
+            return response
+            
     except Exception as e:
-        logger.error(f"Ошибка поиска лучшего ответа: {str(e)}")
-        return None
+        logger.error(f"Ошибка поиска с ИИ: {str(e)}")
+        return "❌ Произошла ошибка при поиске информации"
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -221,8 +175,7 @@ def save_history(user_id, question, response):
         user_history[user_id].pop(0)
     user_history[user_id].append({
         "question": question,
-        "response": response,
-        "timestamp": time.time()
+        "response": response
     })
 
 def process_image(image_data):
@@ -242,7 +195,7 @@ def process_image(image_data):
         image = enhancer.enhance(3.0)
         # Легкое размытие для уменьшения шума
         image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        # Бинаризация
+        # Бинаризация (адаптивное пороговое преобразование)
         image = ImageOps.autocontrast(image)
         image = image.point(lambda p: 255 if p > 160 else 0)
         # Масштабирование для мелкого текста
@@ -271,7 +224,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Искать ответы на текстовые вопросы\n"
+            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -326,24 +279,8 @@ def process_text_question(message):
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
         
-        # Ищем лучший ответ
-        search_results = find_best_answer(question)
-        
-        if not search_results:
-            bot.send_message(
-                chat_id, 
-                "❌ По вашему запросу ничего не найдено.\nПопробуйте:\n• Переформулировать вопрос\n• Использовать другие ключевые слова\n• Проверить орфографию",
-                reply_markup=create_menu()
-            )
-            return
-        
-        # Формируем ответ с лучшим результатом
-        best_result = search_results[0]
-        response_text = f"🔍 <b>Лучший ответ на ваш вопрос:</b>\n\n"
-        response_text += f"<b>{best_result['title']}</b>\n"
-        response_text += f"<i>{best_result['snippet']}</i>\n"
-        if best_result['url'] != "#":
-            response_text += f"\n<a href='{best_result['url']}'>🔗 Подробнее</a>"
+        # Ищем ответ с использованием ИИ
+        response_text = search_with_ai(question)
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -394,19 +331,7 @@ def handle_photo(message):
         )
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Ищу ответ по распознанному тексту...")
-        search_results = find_best_answer(text)
-        
-        if not search_results:
-            bot.send_message(chat_id, "❌ По распознанному тексту ничего не найдено.", reply_markup=create_menu())
-            return
-        
-        # Формируем ответ с лучшим результатом
-        best_result = search_results[0]
-        response_text = f"🔍 <b>Лучший ответ на ваше задание:</b>\n\n"
-        response_text += f"<b>{best_result['title']}</b>\n"
-        response_text += f"<i>{best_result['snippet']}</i>\n"
-        if best_result['url'] != "#":
-            response_text += f"\n<a href='{best_result['url']}'>🔗 Подробнее</a>"
+        response_text = search_with_ai(text)
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -438,8 +363,8 @@ def handle_history(message):
             question = item['question'] if len(item['question']) < 50 else item['question'][:50] + "..."
             response += f"<b>{i}. Вопрос:</b> {question}\n"
             # Показываем первый результат из ответа
-            first_result = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
-            response += f"<b>Ответ:</b> {first_result}\n"
+            first_line = item['response'].split('\n')[0] if '\n' in item['response'] else item['response'][:100] + "..."
+            response += f"<b>Ответ:</b> {first_line}\n"
             response += "─" * 20 + "\n"
         bot.send_message(
             chat_id,
