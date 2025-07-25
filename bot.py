@@ -29,10 +29,6 @@ if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
-if not OPENROUTER_API_KEY:
-    logger.error("OPENROUTER_API_KEY не установлен!")
-    raise ValueError("OPENROUTER_API_KEY не установлен")
-
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
 
@@ -43,6 +39,20 @@ try:
 except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
+
+# Улучшенные заголовки для обхода блокировок
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0"
+}
 
 # Настройки OpenRouter API
 OPENROUTER_HEADERS = {
@@ -65,6 +75,10 @@ def create_menu():
 
 def query_openrouter_api(prompt):
     """Отправляет запрос в OpenRouter API"""
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY не установлен")
+        return "❌ Ключ API OpenRouter не установлен. Не удалось получить ответ от ИИ."
+    
     try:
         logger.info(f"Запрос к OpenRouter API: {prompt}")
         
@@ -93,25 +107,28 @@ def query_openrouter_api(prompt):
             answer = data['choices'][0]['message']['content'].strip()
             logger.info(f"Получен ответ от OpenRouter API: {len(answer)} символов")
             return answer
+        elif response.status_code == 401:
+            logger.error("OpenRouter API вернул 401: Неверный токен")
+            return "❌ Ошибка авторизации OpenRouter API. Проверьте токен."
+        elif response.status_code == 403:
+            logger.error("OpenRouter API вернул 403: Доступ запрещен")
+            return "❌ Доступ к OpenRouter API запрещен. Проверьте токен и ограничения."
         elif response.status_code == 429:
             logger.error("OpenRouter API вернул 429: Превышен лимит запросов")
-            return "⏰ Превышен лимит запросов к ИИ. Попробуйте позже."
-        elif response.status_code == 502:
-            logger.error("OpenRouter API вернул 502: Ошибка шлюза")
-            return "🔌 Ошибка подключения к сервису ИИ. Попробуйте позже."
+            return "⏰ Превышен лимит запросов к OpenRouter API. Попробуйте позже."
         else:
             logger.error(f"OpenRouter API вернул статус {response.status_code}: {response.text}")
-            return f"❌ Ошибка API ИИ: {response.status_code}"
+            return f"❌ Ошибка OpenRouter API: {response.status_code}"
             
     except requests.exceptions.Timeout:
         logger.error("Таймаут при запросе к OpenRouter API")
-        return "⌛ Таймаут соединения с ИИ. Попробуйте позже."
+        return "⌛ Таймаут соединения с OpenRouter API"
     except requests.exceptions.ConnectionError:
         logger.error("Ошибка подключения к OpenRouter API")
-        return "🔌 Ошибка подключения к сервису ИИ."
+        return "🔌 Ошибка подключения к OpenRouter API"
     except Exception as e:
         logger.error(f"Ошибка запроса к OpenRouter API: {str(e)}")
-        return f"⚠️ Ошибка ИИ: {str(e)}"
+        return f"⚠️ Ошибка OpenRouter API: {str(e)}"
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -171,7 +188,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Отвечать на вопросы с помощью ИИ (через OpenRouter)\n"
+            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -225,21 +242,17 @@ def process_text_question(message):
 
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
-        status_msg = bot.send_message(chat_id, "🔍 Обрабатываю ваш запрос с помощью ИИ...")
         
         # Получаем ответ от ИИ через OpenRouter
         ai_answer = query_openrouter_api(question)
         
-        # Обновляем статус
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_msg.message_id,
-            text="✅ Ответ получен!"
-        )
-        
-        # Форматирование ответа
-        response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
+        if ai_answer:
+            # Возвращаем ответ от ИИ
+            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+            response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
+        else:
+            # Если ИИ не ответил, показываем сообщение об ошибке
+            response_text = "❌ Не удалось получить ответ от ИИ.\nПопробуйте:\n• Переформулировать вопрос\n• Проверить подключение к интернету\n• Попробовать позже"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -292,9 +305,13 @@ def handle_photo(message):
         bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст с помощью ИИ...")
         ai_answer = query_openrouter_api(f"Объясни содержание следующего текста: {text}")
         
-        # Форматирование ответа
-        response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
+        if ai_answer:
+            # Возвращаем ответ от ИИ
+            response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}\n\n"
+            response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
+        else:
+            # Если ИИ не ответил, показываем сообщение об ошибке
+            response_text = "❌ Не удалось получить ответ от ИИ по распознанному тексту.\nПопробуйте:\n• Переформулировать вопрос\n• Проверить подключение к интернету\n• Попробовать позже"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
