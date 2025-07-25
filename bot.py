@@ -7,11 +7,9 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 import io
 from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-import threading
 import re
 import time
 import json
-from urllib.parse import quote_plus
 
 # Настройка логирования
 logging.basicConfig(
@@ -44,20 +42,6 @@ except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
 
-# Улучшенные заголовки для обхода блокировок
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "max-age=0"
-}
-
 # OpenRouter API настройки
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -78,13 +62,13 @@ def create_menu():
     return markup
 
 def query_openrouter_api(prompt):
-    """Отправляет запрос в OpenRouter API"""
+    """Отправляет запрос в OpenRouter API с использованием DeepSeek или Qwen 2.5"""
     try:
-        logger.info(f"Запрос к OpenRouter API: {prompt}")
+        logger.info(f"Запрос к OpenRouter API: {prompt[:100]}...")
         
         url = "https://openrouter.ai/api/v1/chat/completions"
         payload = {
-            "model": "openai/gpt-3.5-turbo",  # Можно изменить на другую модель
+            "model": "deepseek-ai/deepseek-coder:33b-instruct",  # Или qwen/qwen2.5:72b-instruct
             "messages": [
                 {
                     "role": "system",
@@ -96,10 +80,12 @@ def query_openrouter_api(prompt):
                 }
             ],
             "temperature": 0.7,
-            "max_tokens": 1000
+            "max_tokens": 2000,
+            "frequency_penalty": 0.2,
+            "presence_penalty": 0.2
         }
         
-        response = requests.post(url, headers=OPENROUTER_HEADERS, json=payload, timeout=30)
+        response = requests.post(url, headers=OPENROUTER_HEADERS, json=payload, timeout=60)
         logger.info(f"OpenRouter API status: {response.status_code}")
         
         if response.status_code == 200:
@@ -143,38 +129,26 @@ def save_history(user_id, question, response):
     })
 
 def process_image(image_data):
-    """Распознает текст на изображении с улучшенной предобработкой"""
+    """Распознает текст на изображении с оптимизированной обработкой"""
     try:
         image = Image.open(io.BytesIO(image_data))
-        # Конвертация в градации серого
+        
+        # Оптимизированная предобработка
         if image.mode != 'L':
             image = image.convert('L')
-        # Автоконтраст
-        image = ImageOps.autocontrast(image, cutoff=10)
-        # Увеличение контраста
+        
+        # Быстрая обработка
+        image = ImageOps.autocontrast(image, cutoff=5)
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.5)
-        # Увеличение резкости
-        enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(3.0)
-        # Легкое размытие для уменьшения шума
-        image = image.filter(ImageFilter.GaussianBlur(radius=0.7))
-        # Бинаризация
-        image = ImageOps.autocontrast(image)
-        image = image.point(lambda p: 255 if p > 160 else 0)
-        # Масштабирование для мелкого текста
-        if min(image.size) < 1000:
-            scale_factor = max(2500 / min(image.size), 2.5)
-            new_size = (int(image.width * scale_factor), int(image.height * scale_factor))
-            image = image.resize(new_size, Image.LANCZOS)
-        # Повышение резкости после масштабирования
-        enhancer = ImageEnhance.Sharpness(image)
         image = enhancer.enhance(2.0)
-        # Распознаем текст с оптимальными параметрами
+        image = image.filter(ImageFilter.SHARPEN)
+        image = image.point(lambda p: 255 if p > 160 else 0)
+        
+        # Распознаем текст
         custom_config = r'--oem 3 --psm 6 -l rus+eng'
         text = pytesseract.image_to_string(image, config=custom_config)
-        # Очистка текста
         text = re.sub(r'\s+', ' ', text).strip()
+        
         logger.info(f"Распознано символов: {len(text)}")
         return text
     except Exception as e:
@@ -256,7 +230,7 @@ def process_text_question(message):
         
         # Форматирование ответа
         response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
+        response_text += "<i>Ответ сгенерирован с помощью DeepSeek AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -283,35 +257,40 @@ def handle_photo(message):
         file_id = message.photo[-1].file_id
         file_info = bot.get_file(file_id)
         file_data = bot.download_file(file_info.file_path)
-        bot.send_message(chat_id, "🖼️ Обрабатываю изображение...")
-        bot.send_chat_action(chat_id, 'typing')
+        
         # Распознаем текст
+        bot.send_chat_action(chat_id, 'typing')
         start_time = time.time()
         text = process_image(file_data)
         elapsed_time = time.time() - start_time
         logger.info(f"OCR занял {elapsed_time:.2f} секунд")
-        if not text or len(text) < 10:
+        
+        if not text or len(text) < 5:
             bot.send_message(
                 chat_id, 
-                "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом\n• Отправить более четкое изображение",
+                "❌ Не удалось распознать текст на фото.\nПопробуйте:\n• Улучшить освещение\n• Сфокусироваться на тексте\n• Сделать фото под прямым углом",
                 reply_markup=create_menu()
             )
             return
+            
         # Обрезаем длинный текст для отображения
         display_text = text[:300] + "..." if len(text) > 300 else text
         bot.send_message(
             chat_id,
             f"📝 Распознанный текст:\n<code>{display_text}</code>",
-            parse_mode='HTML',
-            reply_markup=create_menu()
+            parse_mode='HTML'
         )
+        
         # Ищем ответ по распознанному тексту
-        bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст с помощью ИИ...")
+        processing_msg = bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст с помощью ИИ...")
         ai_answer = query_openrouter_api(text)
+        
+        # Удаляем сообщение о обработке
+        bot.delete_message(chat_id, processing_msg.message_id)
         
         # Форматирование ответа
         response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
+        response_text += "<i>Ответ сгенерирован с помощью Qwen 2.5 AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -386,39 +365,33 @@ def configure_webhook():
         # Для Render.com
         if os.environ.get('RENDER'):
             external_url = os.environ.get('RENDER_EXTERNAL_URL')
-            if external_url:
-                webhook_url = f"{external_url}/webhook"
-                # Проверка доступности бота
-                try:
-                    bot.get_me()
-                    logger.info("Бот доступен, устанавливаем вебхук")
-                except Exception as e:
-                    logger.error(f"Ошибка доступа к боту: {str(e)}")
-                    return
-                # Удаляем существующий вебхук перед установкой нового
-                bot.remove_webhook()
-                logger.info("Старый вебхук удален")
-                # Устанавливаем новый вебхук в фоновом потоке
-                def set_webhook_background():
-                    import time
-                    time.sleep(3)
-                    try:
-                        bot.set_webhook(url=webhook_url)
-                        logger.info(f"Вебхук установлен: {webhook_url}")
-                        # Проверяем информацию о вебхуке
-                        webhook_info = bot.get_webhook_info()
-                        logger.info(f"Информация о вебхуке: {webhook_info}")
-                    except Exception as e:
-                        logger.error(f"Ошибка установки вебхука: {str(e)}")
-                thread = threading.Thread(target=set_webhook_background)
-                thread.daemon = True
-                thread.start()
+            if not external_url:
+                logger.error("RENDER_EXTERNAL_URL не установлен!")
                 return
-            else:
-                logger.warning("RENDER_EXTERNAL_URL не найден!")
-        # Для других платформ/локального запуска
-        bot.remove_webhook()
-        logger.info("Вебхук удален, используется polling")
+                
+            webhook_url = f"{external_url}/webhook"
+            logger.info(f"Попытка установки вебхука: {webhook_url}")
+            
+            # Удаляем существующий вебхук
+            bot.remove_webhook()
+            time.sleep(1)
+            
+            # Устанавливаем новый вебхук
+            try:
+                bot.set_webhook(url=webhook_url)
+                logger.info(f"Вебхук установлен: {webhook_url}")
+                
+                # Проверяем информацию о вебхуке
+                webhook_info = bot.get_webhook_info()
+                logger.info(f"Информация о вебхуке: {webhook_info}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка установки вебхука: {str(e)}")
+        else:
+            # Для локальной разработки
+            bot.remove_webhook()
+            logger.info("Вебхук удален, используется polling")
+            
     except Exception as e:
         logger.error(f"Ошибка настройки вебхука: {str(e)}")
 
