@@ -9,7 +9,6 @@ from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import re
 import time
-import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -101,23 +100,29 @@ def query_openrouter_api(prompt):
             logger.info(f"Получен ответ от OpenRouter API: {len(answer)} символов")
             return answer
         else:
-            error_info = response.json().get('error', {})
-            error_code = error_info.get('code', 'UNKNOWN')
-            error_message = error_info.get('message', 'Без описания')
-            
-            logger.error(f"OpenRouter API error {response.status_code}: [{error_code}] {error_message}")
-            
-            # Формируем понятное сообщение об ошибке
-            if response.status_code == 400:
-                return f"❌ Ошибка запроса к ИИ: {error_message}"
-            elif response.status_code == 401:
-                return "❌ Ошибка авторизации OpenRouter API. Проверьте токен."
-            elif response.status_code == 403:
-                return "❌ Доступ к OpenRouter API запрещен. Проверьте токен и ограничения."
-            elif response.status_code == 429:
-                return "⏰ Превышен лимит запросов к OpenRouter API. Попробуйте позже."
-            else:
-                return f"❌ Ошибка OpenRouter API: {response.status_code} - {error_code}"
+            # Детальный анализ ошибки
+            try:
+                error_data = response.json()
+                error_info = error_data.get('error', {})
+                error_code = error_info.get('code', 'UNKNOWN')
+                error_message = error_info.get('message', 'Без описания')
+                
+                logger.error(f"OpenRouter API error {response.status_code}: [{error_code}] {error_message}")
+                
+                # Формируем понятное сообщение об ошибке
+                if response.status_code == 400:
+                    return f"❌ Ошибка запроса к ИИ: {error_message}"
+                elif response.status_code == 401:
+                    return "❌ Ошибка авторизации OpenRouter API. Проверьте токен."
+                elif response.status_code == 403:
+                    return "❌ Доступ к OpenRouter API запрещен. Проверьте токен и ограничения."
+                elif response.status_code == 429:
+                    return "⏰ Превышен лимит запросов к OpenRouter API. Попробуйте позже."
+                else:
+                    return f"❌ Ошибка OpenRouter API: {response.status_code} - {error_code}"
+            except json.JSONDecodeError:
+                logger.error(f"OpenRouter API вернул невалидный JSON: {response.text[:200]}")
+                return f"❌ Ошибка OpenRouter API: {response.status_code}"
             
     except requests.exceptions.Timeout:
         logger.error("Таймаут при запросе к OpenRouter API")
@@ -242,8 +247,11 @@ def process_text_question(message):
         )
         
         # Форматирование ответа
-        response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью DeepSeek AI</i>"
+        if "❌" in ai_answer or "⚠️" in ai_answer or "⏰" in ai_answer:
+            response_text = f"🤖 <b>Ошибка обработки запроса:</b>\n{ai_answer}"
+        else:
+            response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+            response_text += "<i>Ответ сгенерирован с помощью DeepSeek AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -299,11 +307,17 @@ def handle_photo(message):
         ai_answer = query_openrouter_api(text)
         
         # Удаляем сообщение о обработке
-        bot.delete_message(chat_id, processing_msg.message_id)
+        try:
+            bot.delete_message(chat_id, processing_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение: {str(e)}")
         
         # Форматирование ответа
-        response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью Qwen 2.5 AI</i>"
+        if "❌" in ai_answer or "⚠️" in ai_answer or "⏰" in ai_answer:
+            response_text = f"🤖 <b>Ошибка обработки фото:</b>\n{ai_answer}"
+        else:
+            response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}\n\n"
+            response_text += "<i>Ответ сгенерирован с помощью Qwen 2.5 AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
@@ -386,8 +400,12 @@ def configure_webhook():
             logger.info(f"Попытка установки вебхука: {webhook_url}")
             
             # Удаляем существующий вебхук
-            bot.remove_webhook()
-            time.sleep(1)
+            try:
+                bot.remove_webhook()
+                logger.info("Старый вебхук удален")
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Ошибка удаления вебхука: {str(e)}")
             
             # Устанавливаем новый вебхук
             try:
@@ -396,7 +414,7 @@ def configure_webhook():
                 
                 # Проверяем информацию о вебхуке
                 webhook_info = bot.get_webhook_info()
-                logger.info(f"Информация о вебхуке: {webhook_info}")
+                logger.info(f"Информация о вебхуке: {webhook_info.url}")
                 
             except Exception as e:
                 logger.error(f"Ошибка установки вебхука: {str(e)}")
