@@ -67,8 +67,15 @@ def query_openrouter_api(prompt):
         logger.info(f"Запрос к OpenRouter API: {prompt[:100]}...")
         
         url = "https://openrouter.ai/api/v1/chat/completions"
+        
+        # Определяем модель в зависимости от типа запроса
+        if "Фото:" in prompt:
+            model_id = "qwen/qwen2-72b-instruct"
+        else:
+            model_id = "deepseek-ai/deepseek-coder-33b-instruct"
+        
         payload = {
-            "model": "deepseek-ai/deepseek-coder:33b-instruct",  # Или qwen/qwen2.5:72b-instruct
+            "model": model_id,
             "messages": [
                 {
                     "role": "system",
@@ -93,28 +100,34 @@ def query_openrouter_api(prompt):
             answer = data['choices'][0]['message']['content'].strip()
             logger.info(f"Получен ответ от OpenRouter API: {len(answer)} символов")
             return answer
-        elif response.status_code == 401:
-            logger.error("OpenRouter API вернул 401: Неверный токен")
-            return "❌ Ошибка авторизации OpenRouter API. Проверьте токен."
-        elif response.status_code == 403:
-            logger.error("OpenRouter API вернул 403: Доступ запрещен")
-            return "❌ Доступ к OpenRouter API запрещен. Проверьте токен и ограничения."
-        elif response.status_code == 429:
-            logger.error("OpenRouter API вернул 429: Превышен лимит запросов")
-            return "⏰ Превышен лимит запросов к OpenRouter API. Попробуйте позже."
         else:
-            logger.error(f"OpenRouter API вернул статус {response.status_code}: {response.text[:200]}")
-            return f"❌ Ошибка OpenRouter API: {response.status_code}"
+            error_info = response.json().get('error', {})
+            error_code = error_info.get('code', 'UNKNOWN')
+            error_message = error_info.get('message', 'Без описания')
+            
+            logger.error(f"OpenRouter API error {response.status_code}: [{error_code}] {error_message}")
+            
+            # Формируем понятное сообщение об ошибке
+            if response.status_code == 400:
+                return f"❌ Ошибка запроса к ИИ: {error_message}"
+            elif response.status_code == 401:
+                return "❌ Ошибка авторизации OpenRouter API. Проверьте токен."
+            elif response.status_code == 403:
+                return "❌ Доступ к OpenRouter API запрещен. Проверьте токен и ограничения."
+            elif response.status_code == 429:
+                return "⏰ Превышен лимит запросов к OpenRouter API. Попробуйте позже."
+            else:
+                return f"❌ Ошибка OpenRouter API: {response.status_code} - {error_code}"
             
     except requests.exceptions.Timeout:
         logger.error("Таймаут при запросе к OpenRouter API")
-        return "⌛ Таймаут соединения с OpenRouter API"
+        return "⌛ Таймаут соединения с ИИ-сервисом"
     except requests.exceptions.ConnectionError:
         logger.error("Ошибка подключения к OpenRouter API")
-        return "🔌 Ошибка подключения к OpenRouter API"
+        return "🔌 Ошибка подключения к ИИ-сервису"
     except Exception as e:
         logger.error(f"Ошибка запроса к OpenRouter API: {str(e)}")
-        return f"⚠️ Ошибка OpenRouter API: {str(e)}"
+        return f"⚠️ Непредвиденная ошибка: {str(e)}"
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
