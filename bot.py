@@ -11,6 +11,7 @@ import threading
 import re
 import time
 import json
+from urllib.parse import quote_plus
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,15 +23,15 @@ app = Flask(__name__)
 
 # Конфигурация
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY') # Добавляем переменную для DeepSeek
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
 if not BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не установлен!")
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
 
-if not DEEPSEEK_API_KEY:
-    logger.error("DEEPSEEK_API_KEY не установлен!")
-    raise ValueError("DEEPSEEK_API_KEY не установлен")
+if not OPENROUTER_API_KEY:
+    logger.error("OPENROUTER_API_KEY не установлен!")
+    raise ValueError("OPENROUTER_API_KEY не установлен")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 logger.info("Бот инициализирован")
@@ -43,6 +44,28 @@ except Exception as e:
     logger.error(f"Tesseract check failed: {str(e)}")
     raise
 
+# Улучшенные заголовки для обхода блокировок
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0"
+}
+
+# OpenRouter API настройки
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": os.environ.get('RENDER_EXTERNAL_URL', 'https://your-bot.onrender.com'),
+    "X-Title": "StudyBot",
+    "Content-Type": "application/json"
+}
+
 # Хранение истории
 user_history = {}
 
@@ -54,21 +77,14 @@ def create_menu():
     markup.add(KeyboardButton('ℹ️ Помощь'))
     return markup
 
-def query_deepseek_api(prompt):
-    """Отправляет запрос в DeepSeek API"""
+def query_openrouter_api(prompt):
+    """Отправляет запрос в OpenRouter API"""
     try:
-        logger.info(f"Запрос к DeepSeek API: {prompt}")
+        logger.info(f"Запрос к OpenRouter API: {prompt}")
         
-        url = "https://api.deepseek.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": os.environ.get('RENDER_EXTERNAL_URL', 'https://your-bot.onrender.com'),
-            "X-Title": "StudyBot"
-        }
-        
+        url = "https://openrouter.ai/api/v1/chat/completions"
         payload = {
-            "model": "deepseek-chat", # Или "deepseek-coder" для программирования
+            "model": "openai/gpt-3.5-turbo",  # Можно изменить на другую модель
             "messages": [
                 {
                     "role": "system",
@@ -79,41 +95,40 @@ def query_deepseek_api(prompt):
                     "content": prompt
                 }
             ],
-            "stream": False,
             "temperature": 0.7,
             "max_tokens": 1000
         }
         
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        logger.info(f"DeepSeek API status: {response.status_code}")
+        response = requests.post(url, headers=OPENROUTER_HEADERS, json=payload, timeout=30)
+        logger.info(f"OpenRouter API status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
             answer = data['choices'][0]['message']['content'].strip()
-            logger.info(f"Получен ответ от DeepSeek API: {len(answer)} символов")
+            logger.info(f"Получен ответ от OpenRouter API: {len(answer)} символов")
             return answer
         elif response.status_code == 401:
-            logger.error("DeepSeek API вернул 401: Неверный токен")
-            return "❌ Ошибка авторизации DeepSeek API. Проверьте токен."
+            logger.error("OpenRouter API вернул 401: Неверный токен")
+            return "❌ Ошибка авторизации OpenRouter API. Проверьте токен."
         elif response.status_code == 403:
-            logger.error("DeepSeek API вернул 403: Доступ запрещен")
-            return "❌ Доступ к DeepSeek API запрещен. Проверьте токен и ограничения."
+            logger.error("OpenRouter API вернул 403: Доступ запрещен")
+            return "❌ Доступ к OpenRouter API запрещен. Проверьте токен и ограничения."
         elif response.status_code == 429:
-            logger.error("DeepSeek API вернул 429: Превышен лимит запросов")
-            return "⏰ Превышен лимит запросов к DeepSeek API. Попробуйте позже."
+            logger.error("OpenRouter API вернул 429: Превышен лимит запросов")
+            return "⏰ Превышен лимит запросов к OpenRouter API. Попробуйте позже."
         else:
-            logger.error(f"DeepSeek API вернул статус {response.status_code}: {response.text[:200]}")
-            return f"❌ Ошибка DeepSeek API: {response.status_code}"
+            logger.error(f"OpenRouter API вернул статус {response.status_code}: {response.text[:200]}")
+            return f"❌ Ошибка OpenRouter API: {response.status_code}"
             
     except requests.exceptions.Timeout:
-        logger.error("Таймаут при запросе к DeepSeek API")
-        return "⌛ Таймаут соединения с DeepSeek API"
+        logger.error("Таймаут при запросе к OpenRouter API")
+        return "⌛ Таймаут соединения с OpenRouter API"
     except requests.exceptions.ConnectionError:
-        logger.error("Ошибка подключения к DeepSeek API")
-        return "🔌 Ошибка подключения к DeepSeek API"
+        logger.error("Ошибка подключения к OpenRouter API")
+        return "🔌 Ошибка подключения к OpenRouter API"
     except Exception as e:
-        logger.error(f"Ошибка запроса к DeepSeek API: {str(e)}")
-        return f"⚠️ Ошибка DeepSeek API: {str(e)}"
+        logger.error(f"Ошибка запроса к OpenRouter API: {str(e)}")
+        return f"⚠️ Ошибка OpenRouter API: {str(e)}"
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -173,7 +188,7 @@ def send_welcome(message):
         response = (
             "👋 Привет! Я твой бот-помощник для учебы!\n"
             "Я умею:\n"
-            "• Отвечать на вопросы с помощью ИИ DeepSeek\n"
+            "• Искать ответы на текстовые вопросы (с ИИ!)\n"
             "• Распознавать текст с фотографий\n"
             "• Помогать с учебными материалами\n"
             "📌 Советы для лучшего результата:\n"
@@ -227,10 +242,10 @@ def process_text_question(message):
 
         # Удаляем клавиатуру на время обработки
         bot.send_chat_action(chat_id, 'typing')
-        status_msg = bot.send_message(chat_id, "🔍 Обрабатываю ваш вопрос с помощью ИИ DeepSeek...")
+        status_msg = bot.send_message(chat_id, "🔍 Обрабатываю ваш вопрос с помощью ИИ...")
         
-        # Получаем ответ от DeepSeek
-        answer = query_deepseek_api(question)
+        # Получаем ответ от ИИ через OpenRouter
+        ai_answer = query_openrouter_api(question)
         
         # Обновляем статус
         bot.edit_message_text(
@@ -240,8 +255,8 @@ def process_text_question(message):
         )
         
         # Форматирование ответа
-        response_text = f"🤖 <b>Ответ от ИИ:</b>\n{answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью DeepSeek AI</i>"
+        response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
+        response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
@@ -254,7 +269,7 @@ def process_text_question(message):
             reply_markup=create_menu()
         )
         logger.info("Ответ на текстовый вопрос отправлен")
-        
+
     except Exception as e:
         logger.error(f"Ошибка в process_text_question: {str(e)}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка при обработке запроса.", reply_markup=create_menu())
@@ -292,11 +307,11 @@ def handle_photo(message):
         )
         # Ищем ответ по распознанному тексту
         bot.send_message(chat_id, "🔍 Обрабатываю распознанный текст с помощью ИИ...")
-        answer = query_deepseek_api(f"Объясни содержание следующего текста: {text}")
+        ai_answer = query_openrouter_api(text)
         
         # Форматирование ответа
-        response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{answer}\n\n"
-        response_text += "<i>Ответ сгенерирован с помощью DeepSeek AI</i>"
+        response_text = f"🤖 <b>Ответ от ИИ (по распознанному тексту):</b>\n{ai_answer}\n\n"
+        response_text += "<i>Ответ сгенерирован с помощью OpenRouter AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, f"Фото: {text[:50]}...", response_text)
