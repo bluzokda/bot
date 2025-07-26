@@ -62,14 +62,14 @@ def create_menu():
     return markup
 
 def query_openrouter_api(prompt):
-    """Отправляет запрос в OpenRouter API с использованием Qwen 2.5 72B"""
+    """Отправляет запрос в OpenRouter API с использованием Qwen 2.5"""
     try:
         logger.info(f"Запрос к OpenRouter API: {prompt[:100]}...")
         
         url = "https://openrouter.ai/api/v1/chat/completions"
         
-        # Используем Qwen 2.5 для всех запросов
-        model_id = "qwen/qwen2-72b-instruct"
+        # Используем корректный идентификатор Qwen 2.5
+        model_id = "qwen/qwen2.5-72b-chat"
         
         payload = {
             "model": model_id,
@@ -131,6 +131,27 @@ def query_openrouter_api(prompt):
     except Exception as e:
         logger.error(f"Ошибка запроса к OpenRouter API: {str(e)}")
         return f"⚠️ Непредвиденная ошибка: {str(e)}"
+
+def check_model_availability():
+    """Проверяет доступность модели на OpenRouter"""
+    try:
+        logger.info("Проверка доступности модели...")
+        url = "https://openrouter.ai/api/v1/models"
+        response = requests.get(url, headers=OPENROUTER_HEADERS, timeout=15)
+        
+        if response.status_code == 200:
+            models = [m['id'] for m in response.json().get('data', [])]
+            target_model = "qwen/qwen2.5-72b-chat"
+            
+            if target_model in models:
+                logger.info(f"✅ Модель {target_model} доступна")
+            else:
+                available_models = ", ".join(models)
+                logger.warning(f"❌ Модель {target_model} недоступна! Доступные модели: {available_models}")
+        else:
+            logger.error(f"Ошибка получения списка моделей: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка проверки моделей: {str(e)}")
 
 def save_history(user_id, question, response):
     """Сохраняет историю запросов пользователя"""
@@ -420,6 +441,9 @@ def configure_webhook():
             # Для локальной разработки
             bot.remove_webhook()
             logger.info("Вебхук удален, используется polling")
+            
+        # Проверяем доступность модели
+        check_model_availability()
             
     except Exception as e:
         logger.error(f"Ошибка настройки вебхука: {str(e)}")
