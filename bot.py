@@ -9,6 +9,7 @@ from flask import Flask, request
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import re
 import time
+import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -61,17 +62,14 @@ def create_menu():
     return markup
 
 def query_openrouter_api(prompt):
-    """Отправляет запрос в OpenRouter API с использованием DeepSeek или Qwen 2.5"""
+    """Отправляет запрос в OpenRouter API с использованием Qwen 2.5 72B"""
     try:
         logger.info(f"Запрос к OpenRouter API: {prompt[:100]}...")
         
         url = "https://openrouter.ai/api/v1/chat/completions"
         
-        # Определяем модель в зависимости от типа запроса
-        if "Фото:" in prompt:
-            model_id = "qwen/qwen2-72b-instruct"
-        else:
-            model_id = "deepseek-ai/deepseek-coder-33b-instruct"
+        # Используем Qwen 2.5 для всех запросов
+        model_id = "qwen/qwen2-72b-instruct"
         
         payload = {
             "model": model_id,
@@ -251,7 +249,7 @@ def process_text_question(message):
             response_text = f"🤖 <b>Ошибка обработки запроса:</b>\n{ai_answer}"
         else:
             response_text = f"🤖 <b>Ответ от ИИ:</b>\n{ai_answer}\n\n"
-            response_text += "<i>Ответ сгенерирован с помощью DeepSeek AI</i>"
+            response_text += "<i>Ответ сгенерирован с помощью Qwen 2.5 AI</i>"
         
         # Сохраняем в историю
         save_history(chat_id, question, response_text)
